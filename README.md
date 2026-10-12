@@ -1,4 +1,4 @@
-# La heladera
+# No Se Que Hay en la heladerApp
 
 App Flutter offline-first para recordar qué productos hacen falta en casa.
 
