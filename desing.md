@@ -9,6 +9,7 @@ An app that remembers for you what needs to be bought for the house!
  
 - **Shopping list**
   - Add products.
+  - Edit product names after creation.
   - Each product has a "lifetime" (`lasts_days`); when it expires it shows up as *missing* automatically.
   - Mark a product as bought (one tap).
   - Mark a product as empty (one tap).
@@ -86,7 +87,7 @@ CREATE TABLE member (
  
 CREATE TABLE product (
   id               TEXT PRIMARY KEY,
-  household_id     TEXT NOT NULL REFERENCES household(id),
+  household_id     TEXT REFERENCES household(id), -- nullable for existing local rows; new products require a household
   name             TEXT NOT NULL,
   lasts_days       INTEGER NOT NULL,
   last_bought_at   INTEGER,                 -- NULL = never bought
@@ -108,6 +109,9 @@ CREATE TABLE local_state (
   value  TEXT NOT NULL
 );
 ```
+
+Existing unassigned local products are assigned to a household when one is
+created or joined. New products can only be added after a household exists.
  
 ```mermaid
 erDiagram
@@ -230,7 +234,12 @@ Rows received from a peer may be echoed back on the next sync. That's harmless, 
 ## 6. Pairing and security
  
 - **Household secret**: 32 random bytes created when the household is created.
-- **Joining**: the existing member shows a QR code containing `{household_id, household_name, secret}` (plus an optional one-time expiry). The new member scans it and becomes a member. Nothing else is needed.
+- **Joining**: the existing member shows a QR code containing an `nsqhelh://household?v=1&id=...&name=...&secret=...` invite URI. The `id` and `name` identify the household; the 32-byte secret is also required to authenticate sync. Query parameters are URI-encoded. The app accepts legacy v1 JSON QR payloads so existing invitations continue to work.
+- **QR launch and confirmation**: Android and iOS register the `nsqhelh` scheme so a compatible camera app can open the app. The app then displays the household name and ID and requires confirmation before asking for the joining member's name and accepting the invite. Built-in camera apps do not consistently open custom URI schemes on every device; users can scan inside the app or paste the invitation URI instead.
+- **Already a member**: before presenting the join confirmation or asking for a member name, compare the invite household ID with the current household ID. If they match, do nothing: do not call the join operation, change the member identity, or replace local household state. This check applies to QR scans, pasted invites, and links opened by external camera apps, and must happen before joining/sync setup.
+- **Verified camera-app launch**: scanning the generated QR with Google Lens has successfully opened the app on a tested device. This counts as a successful custom-scheme launch path for that setup; it does not guarantee identical behavior from every camera app or device.
+- **HTTPS links**: the invite parser also accepts `https://<domain>/household?...` to support future Android App Links and iOS Universal Links. Activating those requires a domain controlled by the project, platform association files, and host registration; until then new QR codes use the custom scheme.
+- **Camera fallback**: the scanner reports camera startup/permission errors instead of leaving a blank preview, and offers a paste-invite action. The join screen also provides a paste option when scanning is unavailable.
 - **Membership model**: anyone holding the secret is a member. There are **no admin roles** in v1 because nothing central could enforce them. Any `admin` concept would only be a UI label.
 - **Discovery**: advertise the mDNS service `_groceries._tcp` with a TXT record containing `hash(household_id)`. Phones only attempt to sync with peers advertising their own household hash. Other people's instances on the same network are ignored.
 - **Authentication**: every request is signed with HMAC-SHA256 using the secret. Reject if the timestamp is more than ±5 minutes off (replay protection).
@@ -260,7 +269,11 @@ abstract class HouseholdRepository {
 ```
  
 Every write sets `updated_at = now` (for name/lasts/delete changes) or the relevant timestamp, and a new local `seq`.
- 
+
+The main screen remains accessible without a household so existing products can
+be viewed. Adding a product requires a household; if none exists, the app directs
+the user to create or join one first. The nullable `household_id` supports legacy
+unassigned rows, which are adopted when a household is created or joined.
 
 ## 8. Stack (Flutter)
  
@@ -269,13 +282,22 @@ Every write sets `updated_at = now` (for name/lasts/delete changes) or the relev
 | SQLite | `drift` |
 | HTTP server / client | `shelf`, `http` |
 | mDNS discovery | `nsd` |
-| QR | `qr_flutter` (show), `mobile_scanner` (scan) |
+| QR | `qr_flutter` (show), `mobile_scanner` (scan), `app_links` (open invite links) |
 | IDs | `uuid` |
 | HMAC | `crypto` |
 | State management | `riverpod` (or whatever you prefer) |
  
-**Android**: needs `INTERNET`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, and `NEARBY_WIFI_DEVICES` (Android 13+), plus camera for QR.
-**iOS (later)**: `NSLocalNetworkUsageDescription`, `NSBonjourServices` (`_groceries._tcp`), `NSCameraUsageDescription`. Building needs a Mac. A free Apple ID is enough to test on your own device (the app expires after 7 days); TestFlight/App Store distribution needs the $99/yr developer account.
+**Android**: needs `INTERNET`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, and `NEARBY_WIFI_DEVICES` (Android 13+), plus `CAMERA` for QR. The `nsqhelh://household` scheme is registered as a browsable activity intent.
+**iOS (later)**: `NSLocalNetworkUsageDescription`, `NSBonjourServices` (`_groceries._tcp`), and `NSCameraUsageDescription`. The `nsqhelh` URL scheme is registered for invite launch. Building needs a Mac. A free Apple ID is enough to test on your own device (the app expires after 7 days); TestFlight/App Store distribution needs the $99/yr developer account.
+
+### QR pairing verification
+
+- Test invite URI encoding/decoding with IDs and names containing reserved URL characters.
+- Reject malformed invite URIs, missing fields, and secrets that are not 32 bytes.
+- Preserve compatibility with previously generated v1 JSON invitations.
+- Verify the household page renders a QR widget using the invite URI as its contents.
+- Verify that scan, paste, and incoming app links all pass through the same household-review confirmation before joining.
+- Verify that an invite matching the current household ID is a no-op and does not prompt for confirmation/name or run the join operation.
  
 ## 9. Build order
  
@@ -298,3 +320,25 @@ Every write sets `updated_at = now` (for name/lasts/delete changes) or the relev
 - Should `lasts_days` have sensible defaults or suggestions per product name? at the bare minimum, the interface should suggest 3 days, 5 days, a week, or an input to type in days.
 - Do we want a "last synced with X" indicator in the UI? (Probably yes: otherwise sync failures are invisible.)
 - What happens if someone leaves the household? With a shared secret, the only real answer is rotating it and re-pairing everyone. Probably fine to ignore in v1.
+
+## 11. Future versions
+
+- **v2: Multiple households per user/device.** v1 supports one current household;
+  existing products without a household are adopted when one is created or joined,
+  and creating new products requires a household.
+  v2 should let a user belong to multiple households, switch the active household,
+  and keep each household's products and sync credentials/state scoped to that
+  household. Consider optional onboarding that asks the user to create or join a
+  household before entering the main screen.
+
+## 12. Technical compatibility to keep in mind
+
+- **Flutter built-in Kotlin migration:** The current `mobile_scanner` dependency
+  (resolved as 6.0.11) applies the Kotlin Gradle Plugin (KGP), which newer Flutter
+  tooling warns may prevent builds in a future Flutter version. This is a
+  compatibility warning, not a current scanner runtime error. When upgrading,
+  check the plugin changelog for a release that supports Flutter's built-in
+  Kotlin, update the dependency constraint if the compatible release requires
+  it, and verify Android debug/release builds plus QR scanning. If no compatible
+  release is available, track or report the issue with the plugin rather than
+  hiding the warning in the app's Gradle configuration.

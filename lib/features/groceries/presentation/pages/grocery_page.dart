@@ -17,13 +17,37 @@ class GroceryPage extends ConsumerStatefulWidget {
 class _GroceryPageState extends ConsumerState<GroceryPage> {
   bool _shoppingOnly = false;
 
+  Future<void> _addProduct() async {
+    try {
+      final household = await ref.read(currentHouseholdProvider.future);
+      if (!mounted) return;
+      if (household == null) {
+        await Navigator.of(context).push<void>(
+          MaterialPageRoute<void>(builder: (_) => const HouseholdPage()),
+        );
+        return;
+      }
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => const AddProductSheet(),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo comprobar el hogar: $error')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final products = ref.watch(productsProvider);
     final household = ref.watch(currentHouseholdProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('La heladera'),
+        title: const Text('No se que hay en la heladerApp'),
         actions: [
           IconButton(
             tooltip: 'Hogar y personas',
@@ -54,7 +78,10 @@ class _GroceryPageState extends ConsumerState<GroceryPage> {
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: SegmentedButton<bool>(
               segments: const [
-                ButtonSegment(value: false, label: Text('Todo'), icon: Icon(Icons.kitchen)),
+                ButtonSegment(
+                    value: false,
+                    label: Text('Todo'),
+                    icon: Icon(Icons.kitchen)),
                 ButtonSegment(
                   value: true,
                   label: Text('Para comprar'),
@@ -70,10 +97,13 @@ class _GroceryPageState extends ConsumerState<GroceryPage> {
           Expanded(
             child: products.when(
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (error, _) => Center(child: Text('No se pudo cargar la lista: $error')),
+              error: (error, _) =>
+                  Center(child: Text('No se pudo cargar la lista: $error')),
               data: (allProducts) {
                 final visible = _shoppingOnly
-                    ? allProducts.where((product) => product.needsBuying).toList()
+                    ? allProducts
+                        .where((product) => product.needsBuying)
+                        .toList()
                     : allProducts;
                 if (visible.isEmpty) {
                   return _EmptyState(shoppingOnly: _shoppingOnly);
@@ -91,11 +121,7 @@ class _GroceryPageState extends ConsumerState<GroceryPage> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => showModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          builder: (_) => const AddProductSheet(),
-        ),
+        onPressed: _addProduct,
         icon: const Icon(Icons.add),
         label: const Text('Agregar'),
       ),
@@ -110,7 +136,7 @@ class _HouseholdHint extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
         child: Text(
-          'Tus productos se guardan en este teléfono.',
+          'Creá o unite a un hogar para agregar productos.',
           style: Theme.of(context).textTheme.bodyMedium,
         ),
       );
@@ -129,18 +155,23 @@ class _EmptyState extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                shoppingOnly ? Icons.check_circle_outline : Icons.kitchen_outlined,
+                shoppingOnly
+                    ? Icons.check_circle_outline
+                    : Icons.kitchen_outlined,
                 size: 56,
                 color: Theme.of(context).colorScheme.primary,
               ),
               const SizedBox(height: 16),
               Text(
-                shoppingOnly ? 'No falta nada por comprar' : 'Todavía no agregaste productos',
+                shoppingOnly
+                    ? 'No falta nada por comprar'
+                    : 'Todavía no agregaste productos',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 8),
-              const Text('Agregá lo que usás en casa y te ayudamos a recordarlo.'),
+              const Text(
+                  'Agregá lo que usás en casa y te ayudamos a recordarlo.'),
             ],
           ),
         ),

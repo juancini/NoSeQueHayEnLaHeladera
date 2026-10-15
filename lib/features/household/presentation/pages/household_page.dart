@@ -6,11 +6,14 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../../sync/data/sync_service.dart';
 import '../../../sync/presentation/providers/sync_providers.dart';
+import '../../domain/entities/household_invite.dart';
 import '../providers/household_providers.dart';
 import '../widgets/qr_scanner_page.dart';
 
 class HouseholdPage extends ConsumerStatefulWidget {
-  const HouseholdPage({super.key});
+  const HouseholdPage({super.key, this.invitePayload});
+
+  final String? invitePayload;
 
   @override
   ConsumerState<HouseholdPage> createState() => _HouseholdPageState();
@@ -20,6 +23,17 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
   final _addressController = TextEditingController();
   bool _serverRunning = false;
   bool _syncing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final invitePayload = widget.invitePayload;
+    if (invitePayload != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reviewInvite(context, ref, invitePayload);
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -45,12 +59,76 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
   }
 
   Future<void> _joinHousehold(BuildContext context, WidgetRef ref) async {
-    final name = await _askForName(context, 'Tu nombre');
-    if (name == null || !context.mounted) return;
     final payload = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const QrScannerPage()),
     );
     if (payload == null || !context.mounted) return;
+    await _reviewInvite(context, ref, payload);
+  }
+
+  Future<void> _pasteInvite(BuildContext context, WidgetRef ref) async {
+    final payload = await showDialog<String>(
+      context: context,
+      builder: (_) => const _PasteInviteDialog(),
+    );
+    if (payload == null || !context.mounted) return;
+    await _reviewInvite(context, ref, payload);
+  }
+
+  Future<void> _reviewInvite(
+    BuildContext context,
+    WidgetRef ref,
+    String payload,
+  ) async {
+    late final HouseholdInvite invite;
+    try {
+      invite = HouseholdInvite.fromPayload(payload);
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('La invitación no es válida: $error')),
+        );
+      }
+      return;
+    }
+    try {
+      final currentHousehold =
+          await ref.read(householdRepositoryProvider).current();
+      if (!context.mounted) return;
+      if (currentHousehold?.id == invite.householdId) return;
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('No se pudo comprobar el hogar actual: $error')),
+        );
+      }
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Unirte a este hogar'),
+        content: Text(
+          'Hogar: ${invite.householdName}\nID: ${invite.householdId}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final name = await _askForName(context, 'Tu nombre');
+    if (name == null || !context.mounted) return;
     try {
       await ref.read(householdRepositoryProvider).joinFromQr(payload, name);
       ref.invalidate(currentHouseholdProvider);
@@ -77,7 +155,17 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
             children: [
               const Text('Escaneá este código desde el otro teléfono.'),
               const SizedBox(height: 16),
-              QrImageView(data: payload, size: 220),
+              SizedBox.square(
+                dimension: 220,
+                child: QrImageView(
+                  data: payload,
+                  size: 220,
+                  errorStateBuilder: (context, error) => Text(
+                    'No se pudo generar el código QR: $error',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
             ],
           ),
           actions: [
@@ -182,7 +270,7 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
             const SizedBox(height: 8),
             Text(
               current == null
-                  ? 'Creá un hogar o sumate con una invitación QR. Tus productos siguen disponibles sin conexión.'
+                  ? 'Creá un hogar o sumate con una invitación QR para agregar productos. Los productos existentes siguen disponibles sin conexión.'
                   : 'La lista queda guardada en este teléfono. Activá la red local en ambos teléfonos para sincronizar.',
               textAlign: TextAlign.center,
             ),
@@ -197,6 +285,11 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
                 onPressed: () => _joinHousehold(context, ref),
                 icon: const Icon(Icons.qr_code_scanner),
                 label: const Text('Escanear invitación'),
+              ),
+              TextButton.icon(
+                onPressed: () => _pasteInvite(context, ref),
+                icon: const Icon(Icons.content_paste),
+                label: const Text('Pegar código de invitación'),
               ),
             ] else ...[
               FilledButton.icon(
@@ -373,6 +466,51 @@ class _NameDialogState extends State<_NameDialog> {
             onPressed: () {
               final name = _controller.text.trim();
               if (name.isNotEmpty) Navigator.of(context).pop(name);
+            },
+            child: const Text('Continuar'),
+          ),
+        ],
+      );
+}
+
+class _PasteInviteDialog extends StatefulWidget {
+  const _PasteInviteDialog();
+
+  @override
+  State<_PasteInviteDialog> createState() => _PasteInviteDialogState();
+}
+
+class _PasteInviteDialogState extends State<_PasteInviteDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Pegar invitación'),
+        content: TextField(
+          controller: _controller,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 4,
+          keyboardType: TextInputType.multiline,
+          decoration: const InputDecoration(
+            labelText: 'Código o enlace de invitación',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final payload = _controller.text.trim();
+              if (payload.isNotEmpty) Navigator.of(context).pop(payload);
             },
             child: const Text('Continuar'),
           ),

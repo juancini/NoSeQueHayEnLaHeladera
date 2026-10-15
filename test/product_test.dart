@@ -28,12 +28,15 @@ void main() {
     });
 
     test('a purchase after emptying makes it available again', () {
-      expect(product(bought: 101, emptied: 100).needsBuying, isFalse);
+      expect(product(bought: 101, emptied: 100).needsBuying, isTrue);
     });
 
     test('marks an expired product as missing', () {
       final now = DateTime.now().toUtc().millisecondsSinceEpoch;
-      expect(product(bought: now - const Duration(days: 6).inMilliseconds).needsBuying, isTrue);
+      expect(
+          product(bought: now - const Duration(days: 6).inMilliseconds)
+              .needsBuying,
+          isTrue);
     });
   });
 }

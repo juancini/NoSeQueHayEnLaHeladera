@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../../core/database/app_database.dart';
@@ -31,7 +30,8 @@ class SqliteGroceryRepository implements GroceryRepository {
       onListen: () {
         refresh();
         changesSubscription = _appDatabase.changes.listen((_) => refresh());
-        refreshTimer = Timer.periodic(const Duration(minutes: 1), (_) => refresh());
+        refreshTimer =
+            Timer.periodic(const Duration(minutes: 1), (_) => refresh());
       },
       onCancel: () async {
         refreshTimer?.cancel();
@@ -42,8 +42,8 @@ class SqliteGroceryRepository implements GroceryRepository {
   }
 
   @override
-  Stream<List<Product>> watchShoppingList() =>
-      watchProducts().map((products) => products.where((p) => p.needsBuying).toList());
+  Stream<List<Product>> watchShoppingList() => watchProducts()
+      .map((products) => products.where((p) => p.needsBuying).toList());
 
   Future<List<Product>> _loadProducts() async {
     final rows = await _appDatabase.database.query(
@@ -62,15 +62,27 @@ class SqliteGroceryRepository implements GroceryRepository {
   @override
   Future<Product> addProduct(String name, int lastsDays) async {
     final normalizedName = name.trim();
-    if (normalizedName.isEmpty) throw ArgumentError('El nombre no puede estar vacío');
-    if (lastsDays < 1) throw ArgumentError.value(lastsDays, 'lastsDays');
+    if (normalizedName.isEmpty) {
+      throw ArgumentError('El nombre no puede estar vacío');
+    }
+    if (lastsDays < 1) {
+      throw ArgumentError.value(
+        lastsDays,
+        'lastsDays',
+        'La duración de un producto debe ser al menos un (1) día.',
+      );
+    }
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final memberId = await _appDatabase.readLocalState('member_id') ?? '';
-    final householdRows = await _appDatabase.database.query('household', limit: 1);
-    final householdId =
-        householdRows.isEmpty ? null : householdRows.first['id'] as String;
     late Product product;
     await _appDatabase.database.transaction((transaction) async {
+      final householdRows = await transaction.query('household', limit: 1);
+      if (householdRows.isEmpty) {
+        throw StateError(
+          'Primero tenés que crear o unirte a un hogar para agregar productos',
+        );
+      }
+      final householdId = householdRows.first['id'] as String;
       final sequence = await _appDatabase.nextSequence(transaction);
       final row = <String, Object?>{
         'id': _uuid.v4(),

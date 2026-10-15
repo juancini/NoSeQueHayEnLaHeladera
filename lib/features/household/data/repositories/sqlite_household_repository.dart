@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../../../core/database/app_database.dart';
 import '../../domain/entities/household.dart';
+import '../../domain/entities/household_invite.dart';
 import '../../domain/entities/member.dart';
 import '../../domain/repositories/household_repository.dart';
 
@@ -81,30 +82,21 @@ class SqliteHouseholdRepository implements HouseholdRepository {
     if (household == null || secret == null) {
       throw StateError('Primero tenés que crear un hogar');
     }
-    return jsonEncode({
-      'version': 1,
-      'household_id': household.id,
-      'household_name': household.name,
-      'secret': secret,
-    });
+    return HouseholdInvite(
+      householdId: household.id,
+      householdName: household.name,
+      secret: secret,
+    ).toPayload();
   }
 
   @override
   Future<void> joinFromQr(String payload, String myName) async {
     final memberName = myName.trim();
     if (memberName.isEmpty) throw ArgumentError('El nombre no puede estar vacío');
-    final decoded = jsonDecode(payload);
-    if (decoded is! Map<String, dynamic> ||
-        decoded['version'] != 1 ||
-        decoded['household_id'] is! String ||
-        decoded['household_name'] is! String ||
-        decoded['secret'] is! String ||
-        base64Url.decode(decoded['secret'] as String).length != 32) {
-      throw const FormatException('El código QR no es una invitación válida');
-    }
+    final invite = HouseholdInvite.fromPayload(payload);
     final household = Household(
-      id: decoded['household_id'] as String,
-      name: decoded['household_name'] as String,
+      id: invite.householdId,
+      name: invite.householdName,
     );
     final memberId = _uuid.v4();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
@@ -127,7 +119,7 @@ class SqliteHouseholdRepository implements HouseholdRepository {
         'seq': sequence,
       });
       for (final entry in [
-        MapEntry('household_secret', decoded['secret'] as String),
+        MapEntry('household_secret', invite.secret),
         MapEntry('member_id', memberId),
       ]) {
         await transaction.insert(
