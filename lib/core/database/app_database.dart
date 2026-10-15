@@ -13,6 +13,7 @@ class AppDatabase {
 
   final Database database;
   final _changes = StreamController<void>.broadcast();
+  final _localChanges = StreamController<void>.broadcast();
 
   static Future<AppDatabase> open() async {
     final dbPath = path.join(await getDatabasesPath(), 'heladera.sqlite');
@@ -75,7 +76,12 @@ class AppDatabase {
 
   Stream<void> get changes => _changes.stream;
 
-  void notifyChanged() => _changes.add(null);
+  Stream<void> get localChanges => _localChanges.stream;
+
+  void notifyChanged({bool local = true}) {
+    _changes.add(null);
+    if (local) _localChanges.add(null);
+  }
 
   Future<int> nextSequence(Transaction transaction) async {
     final rows = await transaction.query(
@@ -116,6 +122,7 @@ class AppDatabase {
 
   Future<void> close() async {
     await _changes.close();
+    await _localChanges.close();
     await database.close();
   }
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -23,6 +24,8 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
   final _addressController = TextEditingController();
   bool _serverRunning = false;
   bool _syncing = false;
+  SyncState _syncState = SyncState.idle;
+  StreamSubscription<SyncState>? _syncStateSubscription;
 
   @override
   void initState() {
@@ -38,6 +41,7 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
   @override
   void dispose() {
     _addressController.dispose();
+    unawaited(_syncStateSubscription?.cancel());
     super.dispose();
   }
 
@@ -187,13 +191,48 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
 
   Future<void> _startSyncServer() async {
     try {
-      await ref.read(syncServiceProvider).start();
-      if (mounted) setState(() => _serverRunning = true);
+      final service = ref.read(syncServiceProvider);
+      await service.start();
+      await _syncStateSubscription?.cancel();
+      _syncStateSubscription = service.states.listen((state) {
+        if (mounted) setState(() => _syncState = state);
+      });
+      if (mounted) {
+        setState(() {
+          _serverRunning = service.isRunning;
+          _syncState = service.state;
+        });
+      }
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
               content: Text('No se pudo iniciar el servidor local: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopSyncServer() async {
+    try {
+      final service = ref.read(syncServiceProvider);
+      await service.stop();
+      if (mounted) {
+        setState(() {
+          _serverRunning = service.isRunning;
+          _syncState = service.state;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        final service = ref.read(syncServiceProvider);
+        setState(() {
+          _serverRunning = service.isRunning;
+          _syncState = service.state;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('No se pudo detener la sincronización: $error')),
         );
       }
     }
@@ -212,7 +251,8 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
     }
     setState(() => _syncing = true);
     try {
-      await ref.read(syncServiceProvider).syncWith(
+      final service = ref.read(syncServiceProvider);
+      await service.syncWith(
             Uri(
               scheme: 'http',
               host: address.address,
@@ -220,12 +260,35 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
             ),
           );
       if (mounted) {
+        setState(() => _syncState = service.state);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Lista sincronizada')),
         );
       }
     } catch (error) {
       if (mounted) {
+        if (ref.exists(syncServiceProvider)) {
+          setState(() => _syncState = ref.read(syncServiceProvider).state);
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo sincronizar: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  Future<void> _syncNow() async {
+    setState(() => _syncing = true);
+    try {
+      final service = ref.read(syncServiceProvider);
+      await service.syncNow();
+      if (mounted) setState(() => _syncState = service.state);
+    } catch (error) {
+      if (mounted) {
+        final service = ref.read(syncServiceProvider);
+        setState(() => _syncState = service.state);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('No se pudo sincronizar: $error')),
         );
@@ -257,104 +320,186 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) =>
             Center(child: Text('No se pudo cargar el hogar: $error')),
-        data: (current) => ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            const Icon(Icons.home_outlined, size: 56),
-            const SizedBox(height: 12),
-            Text(
-              current?.name ?? 'Compartí la lista de compras',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              current == null
-                  ? 'Creá un hogar o sumate con una invitación QR para agregar productos. Los productos existentes siguen disponibles sin conexión.'
-                  : 'La lista queda guardada en este teléfono. Activá la red local en ambos teléfonos para sincronizar.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            if (current == null) ...[
-              FilledButton.icon(
-                onPressed: () => _createHousehold(context, ref),
-                icon: const Icon(Icons.add_home_outlined),
-                label: const Text('Crear un hogar'),
+        data: (current) {
+          final syncService = ref.exists(syncServiceProvider)
+              ? ref.watch(syncServiceProvider)
+              : null;
+          final serverRunning =
+              _serverRunning || (syncService?.isRunning ?? false);
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              const Icon(Icons.home_outlined, size: 56),
+              const SizedBox(height: 12),
+              Text(
+                current?.name ?? 'Compartí la lista de compras',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.headlineSmall,
               ),
-              OutlinedButton.icon(
-                onPressed: () => _joinHousehold(context, ref),
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Escanear invitación'),
-              ),
-              TextButton.icon(
-                onPressed: () => _pasteInvite(context, ref),
-                icon: const Icon(Icons.content_paste),
-                label: const Text('Pegar código de invitación'),
-              ),
-            ] else ...[
-              FilledButton.icon(
-                onPressed: () => _showInvite(context, ref),
-                icon: const Icon(Icons.qr_code_2),
-                label: const Text('Invitar a alguien'),
-              ),
-              const SizedBox(height: 28),
-              Text('Sincronización en red local',
-                  style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
               Text(
-                _serverRunning
-                    ? 'Este teléfono está listo en el puerto ${SyncService.port}.'
-                    : 'Primero activá el servidor en este teléfono. En el otro, ingresá la IP local de este dispositivo.',
+                current == null
+                    ? 'Creá un hogar o sumate con una invitación QR para agregar productos. Los productos existentes siguen disponibles sin conexión.'
+                    : 'La lista queda guardada en este teléfono. Activá la red local en ambos teléfonos para sincronizar.',
+                textAlign: TextAlign.center,
               ),
-              FutureBuilder<List<NetworkInterface>>(
-                future: NetworkInterface.list(type: InternetAddressType.IPv4),
-                builder: (context, snapshot) {
-                  final addresses = snapshot.data
-                          ?.expand((interface) => interface.addresses)
-                          .map((address) => address.address)
-                          .where(_isPrivateAddress)
-                          .toSet()
-                          .toList() ??
-                      const <String>[];
-                  if (addresses.isEmpty) return const SizedBox.shrink();
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text('IP de este teléfono: ${addresses.join(', ')}'),
-                  );
-                },
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: _serverRunning ? null : _startSyncServer,
-                icon: const Icon(Icons.wifi_tethering),
-                label: Text(_serverRunning
-                    ? 'Servidor activo'
-                    : 'Activar este teléfono'),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _addressController,
-                keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: 'IP local del otro teléfono',
-                  hintText: '192.168.1.20',
-                  prefixIcon: Icon(Icons.wifi),
+              const SizedBox(height: 24),
+              if (current == null) ...[
+                FilledButton.icon(
+                  onPressed: () => _createHousehold(context, ref),
+                  icon: const Icon(Icons.add_home_outlined),
+                  label: const Text('Crear un hogar'),
                 ),
-              ),
-              const SizedBox(height: 8),
-              FilledButton.icon(
-                onPressed: _syncing ? null : _syncWithAddress,
-                icon: _syncing
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.sync),
-                label: Text(_syncing ? 'Sincronizando…' : 'Sincronizar ahora'),
-              ),
+                OutlinedButton.icon(
+                  onPressed: () => _joinHousehold(context, ref),
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Escanear invitación'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _pasteInvite(context, ref),
+                  icon: const Icon(Icons.content_paste),
+                  label: const Text('Pegar código de invitación'),
+                ),
+              ] else ...[
+                FilledButton.icon(
+                  onPressed: () => _showInvite(context, ref),
+                  icon: const Icon(Icons.qr_code_2),
+                  label: const Text('Invitar a alguien'),
+                ),
+                const SizedBox(height: 28),
+                Text('Sincronización en red local',
+                    style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                Text(
+                  'Con ambos teléfonos en la misma red y la app abierta, '
+                  'la sincronización se realiza automáticamente.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                StreamBuilder<SyncState>(
+                  stream: syncService?.states ?? const Stream<SyncState>.empty(),
+                  initialData: syncService?.state ?? _syncState,
+                  builder: (context, snapshot) {
+                    final state =
+                        snapshot.data ?? syncService?.state ?? _syncState;
+                    final status = !serverRunning
+                        ? 'Activá la sincronización en ambos teléfonos.'
+                        : switch (state.phase) {
+                            SyncPhase.starting => 'Iniciando sincronización…',
+                            SyncPhase.searching =>
+                              'Buscando teléfonos del hogar…',
+                            SyncPhase.syncing => 'Sincronizando…',
+                            SyncPhase.synced =>
+                              state.message ?? 'Lista sincronizada',
+                            SyncPhase.discoveryUnavailable => state.message ??
+                                'Búsqueda automática no disponible.',
+                            SyncPhase.error =>
+                              state.message ?? 'No se pudo sincronizar.',
+                            SyncPhase.idle => 'Sincronización desactivada.',
+                          };
+                    final lastSyncedAt = state.lastSyncedAt;
+                    final lastSyncedText = lastSyncedAt == null
+                        ? null
+                        : 'Última sincronización exitosa: '
+                            '${MaterialLocalizations.of(context).formatTimeOfDay(
+                            TimeOfDay.fromDateTime(lastSyncedAt),
+                          )}.';
+                    return Column(
+                      children: [
+                        Text(status, textAlign: TextAlign.center),
+                        if (lastSyncedText != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            lastSyncedText,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: serverRunning ? _stopSyncServer : _startSyncServer,
+                  icon: Icon(
+                    serverRunning
+                        ? Icons.wifi_tethering_off
+                        : Icons.wifi_tethering,
+                  ),
+                  label: Text(
+                    serverRunning
+                        ? 'Desactivar sincronización'
+                        : 'Activar este teléfono',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: !serverRunning || _syncing ? null : _syncNow,
+                  icon: _syncing
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.sync),
+                  label: Text(_syncing ? 'Sincronizando…' : 'Sincronizar ahora'),
+                ),
+                ExpansionTile(
+                  title: const Text('Opciones manuales'),
+                  subtitle:
+                      const Text('Para diagnóstico o si falla la búsqueda'),
+                  tilePadding: EdgeInsets.zero,
+                  children: [
+                    FutureBuilder<List<NetworkInterface>>(
+                      future:
+                          NetworkInterface.list(type: InternetAddressType.IPv4),
+                      builder: (context, snapshot) {
+                        final addresses = snapshot.data
+                                ?.expand((interface) => interface.addresses)
+                                .map((address) => address.address)
+                                .where(_isPrivateAddress)
+                                .toSet()
+                                .toList() ??
+                            const <String>[];
+                        if (addresses.isEmpty) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            'IP de este teléfono: ${addresses.join(', ')}',
+                          ),
+                        );
+                      },
+                    ),
+                    TextField(
+                      controller: _addressController,
+                      keyboardType: TextInputType.url,
+                      decoration: const InputDecoration(
+                        labelText: 'IP local del otro teléfono',
+                        hintText: '192.168.1.20',
+                        prefixIcon: Icon(Icons.wifi),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                      onPressed: _syncing ? null : _syncWithAddress,
+                      icon: _syncing
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.sync),
+                      label: Text(
+                        _syncing
+                            ? 'Sincronizando…'
+                            : 'Sincronizar con esta IP',
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
-          ],
-        ),
+          );
+        },
       ),
     );
   }

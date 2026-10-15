@@ -37,6 +37,12 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>La cámara se usa para escanear invitaciones de hogar.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Se usa la red local para encontrar y sincronizar teléfonos del mismo hogar.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_groceries._tcp</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

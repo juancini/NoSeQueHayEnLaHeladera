@@ -13,15 +13,19 @@ class SyncDataStore {
     return rows.isEmpty ? null : rows.first['id'] as String?;
   }
 
-  Future<Map<String, Object?>> requestFor(String peerAddress) async {
+  Future<Map<String, Object?>> requestFor(
+    String peerAddress, {
+    String? peerId,
+  }) async {
     return _appDatabase.database.transaction((transaction) async {
       final peerRows = await transaction.query(
         'peer',
-        where: 'address = ?',
-        whereArgs: [peerAddress],
+        where: peerId == null ? 'address = ?' : 'member_id = ?',
+        whereArgs: [peerId ?? peerAddress],
         limit: 1,
       );
-      final peer = peerRows.isEmpty ? const <String, Object?>{} : peerRows.first;
+      final peer =
+          peerRows.isEmpty ? const <String, Object?>{} : peerRows.first;
       final pullCursor = peer['pull_cursor'] as int? ?? 0;
       final pushCursor = peer['push_cursor'] as int? ?? 0;
       final changes = await _changesAfter(pushCursor, executor: transaction);
@@ -55,20 +59,23 @@ class SyncDataStore {
         whereArgs: [senderId],
         limit: 1,
       );
-      final oldPeer = peerRows.isEmpty ? const <String, Object?>{} : peerRows.first;
+      final oldPeer =
+          peerRows.isEmpty ? const <String, Object?>{} : peerRows.first;
       await transaction.insert(
         'peer',
         {
           'member_id': senderId,
-          'pull_cursor': _maxInt(oldPeer['pull_cursor'] as int? ?? 0, senderCursor),
+          'pull_cursor':
+              _maxInt(oldPeer['pull_cursor'] as int? ?? 0, senderCursor),
           'push_cursor': _maxInt(oldPeer['push_cursor'] as int? ?? 0, since),
           'address': oldPeer['address'],
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+      await _recordSuccessfulSync(transaction);
       cursor = await _currentSequence(transaction);
     });
-    _appDatabase.notifyChanged();
+    _appDatabase.notifyChanged(local: false);
     return {'changes': outgoing, 'cursor': cursor};
   }
 
@@ -93,7 +100,10 @@ class SyncDataStore {
         'peer',
         {
           'member_id': peerId,
-          'pull_cursor': cursor,
+          'pull_cursor': _maxInt(
+            oldPeer['pull_cursor'] as int? ?? 0,
+            cursor,
+          ),
           'push_cursor': _maxInt(
             oldPeer['push_cursor'] as int? ?? 0,
             sentThrough,
@@ -102,8 +112,31 @@ class SyncDataStore {
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+      await _recordSuccessfulSync(transaction);
     });
-    _appDatabase.notifyChanged();
+    _appDatabase.notifyChanged(local: false);
+  }
+
+  Future<void> _recordSuccessfulSync(Transaction transaction) async {
+    final rows = await transaction.query(
+      'local_state',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: ['last_sync_at'],
+      limit: 1,
+    );
+    final previous = rows.isEmpty
+        ? 0
+        : int.tryParse(rows.first['value'] as String? ?? '') ?? 0;
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    await transaction.insert(
+      'local_state',
+      {
+        'key': 'last_sync_at',
+        'value': '${now > previous ? now : previous}',
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<List<Map<String, Object?>>> _changesAfter(
@@ -266,7 +299,8 @@ class SyncDataStore {
     }
     final memberId = row['id'] as String;
     final incomingName = (row['name'] as String).trim();
-    if (incomingName.isEmpty) throw const FormatException('Invalid member name');
+    if (incomingName.isEmpty)
+      throw const FormatException('Invalid member name');
     final rows = await transaction.query(
       'member',
       where: 'id = ?',

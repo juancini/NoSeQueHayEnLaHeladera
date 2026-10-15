@@ -96,6 +96,27 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('offers automatic sync with a manual IP fallback',
+      (tester) async {
+    final repository = _HouseholdRepository()
+      ..household = const Household(id: 'home-id', name: 'Casa');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          householdRepositoryProvider.overrideWithValue(repository),
+          currentHouseholdProvider.overrideWith((ref) => repository.current()),
+        ],
+        child: const MaterialApp(home: HouseholdPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Activar este teléfono'), findsOneWidget);
+    expect(find.text('Sincronizar ahora'), findsOneWidget);
+    expect(find.text('Opciones manuales'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('pasted invite requires household confirmation before joining',
       (tester) async {
     final repository = _HouseholdRepository();

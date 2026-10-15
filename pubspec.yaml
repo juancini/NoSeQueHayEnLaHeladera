@@ -17,6 +17,7 @@ dependencies:
   crypto: ^3.0.6
   qr_flutter: ^4.1.0
   mobile_scanner: ^6.0.2
+  nsd: ^5.0.1
 
 dev_dependencies:
   flutter_test:
