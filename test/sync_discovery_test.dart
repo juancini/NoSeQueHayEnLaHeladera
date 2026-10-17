@@ -118,7 +118,7 @@ void main() {
     );
     expect(
       DiscoveredSyncPeer.parse(
-        Service(
+        const Service(
           name: 'other',
           type: '_http._tcp',
           port: 80,

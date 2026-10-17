@@ -253,12 +253,12 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
     try {
       final service = ref.read(syncServiceProvider);
       await service.syncWith(
-            Uri(
-              scheme: 'http',
-              host: address.address,
-              port: SyncService.port,
-            ),
-          );
+        Uri(
+          scheme: 'http',
+          host: address.address,
+          port: SyncService.port,
+        ),
+      );
       if (mounted) {
         setState(() => _syncState = service.state);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -370,14 +370,15 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
                 Text('Sincronización en red local',
                     style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 8),
-                Text(
+                const Text(
                   'Con ambos teléfonos en la misma red y la app abierta, '
                   'la sincronización se realiza automáticamente.',
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 8),
                 StreamBuilder<SyncState>(
-                  stream: syncService?.states ?? const Stream<SyncState>.empty(),
+                  stream:
+                      syncService?.states ?? const Stream<SyncState>.empty(),
                   initialData: syncService?.state ?? _syncState,
                   builder: (context, snapshot) {
                     final state =
@@ -442,7 +443,8 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.sync),
-                  label: Text(_syncing ? 'Sincronizando…' : 'Sincronizar ahora'),
+                  label:
+                      Text(_syncing ? 'Sincronizando…' : 'Sincronizar ahora'),
                 ),
                 ExpansionTile(
                   title: const Text('Opciones manuales'),
@@ -489,9 +491,7 @@ class _HouseholdPageState extends ConsumerState<HouseholdPage> {
                             )
                           : const Icon(Icons.sync),
                       label: Text(
-                        _syncing
-                            ? 'Sincronizando…'
-                            : 'Sincronizar con esta IP',
+                        _syncing ? 'Sincronizando…' : 'Sincronizar con esta IP',
                       ),
                     ),
                   ],

@@ -77,17 +77,30 @@ class ProductTile extends ConsumerWidget {
               tooltip: 'Acciones',
               onSelected: (action) async {
                 try {
-                  if (action == 'rename') {
-                    await showDialog<void>(
-                      context: context,
-                      builder: (_) => _RenameProductDialog(
-                        product: product,
-                        onSave: (name) =>
-                            repository.updateProduct(product.id, name: name),
-                      ),
-                    );
-                  } else if (action == 'delete') {
-                    await repository.deleteProduct(product.id);
+                  switch (action) {
+                    case 'rename':
+                      await showDialog<void>(
+                        context: context,
+                        builder: (_) => _RenameProductDialog(
+                          product: product,
+                          onSave: (name) =>
+                              repository.updateProduct(product.id, name: name),
+                        ),
+                      );
+                      break;
+                    case 'editDays':
+                      await showDialog<void>(
+                        context: context,
+                        builder: (_) => _EditDaysDialog(
+                          product: product,
+                          onSave: (days) => repository.updateProduct(product.id,
+                              lastsDays: days),
+                        ),
+                      );
+                      break;
+                    case 'delete':
+                      await repository.deleteProduct(product.id);
+                      break;
                   }
                 } catch (error) {
                   if (context.mounted) {
@@ -104,6 +117,14 @@ class ProductTile extends ConsumerWidget {
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.edit_outlined),
                     title: Text('Cambiar nombre'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'editDays',
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.edit_calendar_outlined),
+                    title: Text('Cambiar duración'),
                   ),
                 ),
                 const PopupMenuItem(
@@ -183,6 +204,86 @@ class _RenameProductDialogState extends State<_RenameProductDialog> {
             validator: (value) => value == null || value.trim().isEmpty
                 ? 'Escribí un nombre'
                 : null,
+            onFieldSubmitted: (_) => _save(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: _saving ? null : () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: _saving ? null : _save,
+            child: Text(_saving ? 'Guardando…' : 'Guardar'),
+          ),
+        ],
+      );
+}
+
+class _EditDaysDialog extends StatefulWidget {
+  const _EditDaysDialog({
+    required this.product,
+    required this.onSave,
+  });
+
+  final Product product;
+  final Future<void> Function(int days) onSave;
+
+  @override
+  State<_EditDaysDialog> createState() => _EditDaysDialogState();
+}
+
+class _EditDaysDialogState extends State<_EditDaysDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _daysController;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _daysController =
+        TextEditingController(text: widget.product.lastsDays.toString());
+  }
+
+  @override
+  void dispose() {
+    _daysController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final days = int.parse(_daysController.text.trim());
+    setState(() => _saving = true);
+
+    try {
+      await widget.onSave(days);
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('No se pudo cambiar la duración: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Cambiar duración'),
+        content: Form(
+          key: _formKey,
+          child: TextFormField(
+            controller: _daysController,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Días'),
+            validator: (value) {
+              final days = int.tryParse(value?.trim() ?? '');
+              return days == null || days < 1 ? 'Ingresá al menos 1 día' : null;
+            },
             onFieldSubmitted: (_) => _save(),
           ),
         ),

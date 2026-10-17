@@ -299,8 +299,9 @@ class SyncDataStore {
     }
     final memberId = row['id'] as String;
     final incomingName = (row['name'] as String).trim();
-    if (incomingName.isEmpty)
+    if (incomingName.isEmpty) {
       throw const FormatException('Invalid member name');
+    }
     final rows = await transaction.query(
       'member',
       where: 'id = ?',
