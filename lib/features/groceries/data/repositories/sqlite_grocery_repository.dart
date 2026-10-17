@@ -1,15 +1,21 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 
 import '../../../../core/database/app_database.dart';
+import '../drawing_image_storage.dart';
 import '../../domain/entities/product.dart';
 import '../../domain/repositories/grocery_repository.dart';
 
 class SqliteGroceryRepository implements GroceryRepository {
-  SqliteGroceryRepository(this._appDatabase);
+  SqliteGroceryRepository(
+    this._appDatabase, {
+    DrawingImageStorage? imageStorage,
+  }) : _imageStorage = imageStorage ?? DrawingImageStorage();
 
   final AppDatabase _appDatabase;
+  final DrawingImageStorage _imageStorage;
   static const _uuid = Uuid();
 
   @override
@@ -60,7 +66,11 @@ class SqliteGroceryRepository implements GroceryRepository {
   }
 
   @override
-  Future<Product> addProduct(String name, int lastsDays) async {
+  Future<Product> addProduct(
+    String name,
+    int lastsDays, {
+    Uint8List? imagePng,
+  }) async {
     final normalizedName = name.trim();
     if (normalizedName.isEmpty) {
       throw ArgumentError('El nombre no puede estar vacío');
@@ -74,6 +84,8 @@ class SqliteGroceryRepository implements GroceryRepository {
     }
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final memberId = await _appDatabase.readLocalState('member_id') ?? '';
+    final imageSrc =
+        imagePng == null ? null : await _imageStorage.savePng(imagePng);
     late Product product;
     await _appDatabase.database.transaction((transaction) async {
       final householdRows = await transaction.query('household', limit: 1);
@@ -95,6 +107,7 @@ class SqliteGroceryRepository implements GroceryRepository {
         'deleted_at': null,
         'seq': sequence,
         'last_writer_member_id': memberId,
+        'image_src': imageSrc,
       };
       await transaction.insert('product', row);
       product = Product.fromMap(row);
@@ -138,11 +151,30 @@ class SqliteGroceryRepository implements GroceryRepository {
 
   @override
   Future<void> deleteProduct(String id) async {
+    final rows = await _appDatabase.database.query(
+      'product',
+      columns: ['image_src'],
+      where: 'id = ? AND deleted_at IS NULL',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw StateError('No existe el producto solicitado');
+    final imageSrc = rows.first['image_src'] as String?;
     await _writeProduct(
       id,
       {'deleted_at': DateTime.now().toUtc().millisecondsSinceEpoch},
       updateMetadata: true,
     );
+    if (imageSrc != null) {
+      final references = await _appDatabase.database.query(
+        'product',
+        columns: ['id'],
+        where: 'image_src = ? AND deleted_at IS NULL',
+        whereArgs: [imageSrc],
+        limit: 1,
+      );
+      if (references.isEmpty) await _imageStorage.delete(imageSrc);
+    }
   }
 
   Future<void> _writeProduct(

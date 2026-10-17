@@ -1,7 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/grocery_providers.dart';
+import '../pages/draw_product_image_page.dart';
 
 class AddProductSheet extends ConsumerStatefulWidget {
   const AddProductSheet({super.key});
@@ -16,6 +19,7 @@ class _AddProductSheetState extends ConsumerState<AddProductSheet> {
   final _customDaysController = TextEditingController();
   int? _selectedDays = 3;
   bool _saving = false;
+  Uint8List? _imagePng;
   static const _suggestions = [3, 5, 7];
 
   @override
@@ -37,6 +41,7 @@ class _AddProductSheetState extends ConsumerState<AddProductSheet> {
       await ref.read(groceryRepositoryProvider).addProduct(
             _nameController.text,
             _days!,
+            imagePng: _imagePng,
           );
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
@@ -48,6 +53,13 @@ class _AddProductSheetState extends ConsumerState<AddProductSheet> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _drawImage() async {
+    final image = await Navigator.of(context).push<Uint8List>(
+      MaterialPageRoute(builder: (_) => const DrawProductImagePage()),
+    );
+    if (mounted && image != null) setState(() => _imagePng = image);
   }
 
   @override
@@ -108,6 +120,28 @@ class _AddProductSheetState extends ConsumerState<AddProductSheet> {
                     final days = _days;
                     return days == null || days < 1 ? 'Ingresá al menos 1 día' : null;
                   },
+                ),
+              ],
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _drawImage,
+                icon: Icon(_imagePng == null ? Icons.draw_outlined : Icons.image),
+                label: Text(
+                  _imagePng == null
+                      ? 'Dibujar imagen (opcional)'
+                      : 'Cambiar dibujo',
+                ),
+              ),
+              if (_imagePng != null) ...[
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.memory(
+                    _imagePng!,
+                    width: 64,
+                    height: 64,
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ],
               const SizedBox(height: 20),

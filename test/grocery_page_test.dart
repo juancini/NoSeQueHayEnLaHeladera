@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'dart:typed_data';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/domain/entities/product.dart';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/domain/repositories/grocery_repository.dart';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/presentation/pages/grocery_page.dart';
@@ -22,7 +23,7 @@ class _GroceryRepository implements GroceryRepository {
   Stream<List<Product>> watchShoppingList() => Stream.value(const []);
 
   @override
-  Future<Product> addProduct(String name, int lastsDays) =>
+  Future<Product> addProduct(String name, int lastsDays, {Uint8List? imagePng}) =>
       throw UnimplementedError();
 
   @override

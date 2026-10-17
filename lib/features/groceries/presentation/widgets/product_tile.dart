@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/drawing_image_storage.dart';
 import '../../domain/entities/product.dart';
 import '../providers/grocery_providers.dart';
 
@@ -8,6 +11,7 @@ class ProductTile extends ConsumerWidget {
   const ProductTile({required this.product, super.key});
 
   final Product product;
+  static final _imageStorage = DrawingImageStorage();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -23,13 +27,23 @@ class ProductTile extends ConsumerWidget {
               backgroundColor: product.needsBuying
                   ? theme.colorScheme.tertiaryContainer
                   : theme.colorScheme.primaryContainer,
-              child: Icon(
-                product.needsBuying
-                    ? Icons.shopping_basket_outlined
-                    : Icons.kitchen,
-                color: product.needsBuying
-                    ? theme.colorScheme.onTertiaryContainer
-                    : theme.colorScheme.onPrimaryContainer,
+              child: FutureBuilder<File?>(
+                future: _imageStorage.resolve(product.imageSrc),
+                builder: (context, snapshot) {
+                  final file = snapshot.data;
+                  if (file != null) {
+                    return ClipOval(
+                      child: Image.file(
+                        file,
+                        width: 40,
+                        height: 40,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _placeholder(theme),
+                      ),
+                    );
+                  }
+                  return _placeholder(theme);
+                },
               ),
             ),
             const SizedBox(width: 12),
@@ -65,6 +79,7 @@ class ProductTile extends ConsumerWidget {
                       SnackBar(content: Text('No se pudo actualizar: $error')),
                     );
                   }
+
                 }
               },
               icon: Icon(
@@ -142,6 +157,13 @@ class ProductTile extends ConsumerWidget {
       ),
     );
   }
+
+  Widget _placeholder(ThemeData theme) => Icon(
+        product.needsBuying ? Icons.shopping_basket_outlined : Icons.kitchen,
+        color: product.needsBuying
+            ? theme.colorScheme.onTertiaryContainer
+            : theme.colorScheme.onPrimaryContainer,
+      );
 }
 
 class _RenameProductDialog extends StatefulWidget {

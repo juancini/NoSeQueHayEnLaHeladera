@@ -9,6 +9,8 @@ import 'package:flutter/widgets.dart';
 import 'package:nsd/nsd.dart';
 
 import '../../../core/database/app_database.dart';
+import '../../groceries/data/drawing_image_storage.dart';
+import '../domain/sync_image_negotiation.dart';
 import 'discovered_sync_peer.dart';
 import 'sync_data_store.dart';
 
@@ -41,17 +43,21 @@ class SyncService extends WidgetsBindingObserver {
 
   static const port = 47622;
   static const _maxBodyBytes = 1024 * 1024;
+  static const _maxImageBytes = 10 * 1024 * 1024;
+  static const _protocolVersion = 2;
   static const _clockToleranceMs = 5 * 60 * 1000;
   static const _serviceType = DiscoveredSyncPeer.serviceType;
 
   final AppDatabase _appDatabase;
   final SyncDataStore _store;
+  final DrawingImageStorage _imageStorage = DrawingImageStorage();
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 10);
   final _states = StreamController<SyncState>.broadcast();
   final Map<String, DiscoveredSyncPeer> _peers = {};
   final Map<String, Future<void>> _inFlight = {};
   final Map<String, Future<void>> _manualInFlight = {};
+  final Map<String, _ServerSnapshot> _serverSnapshots = {};
 
   HttpServer? _server;
   Registration? _registration;
@@ -161,6 +167,7 @@ class SyncService extends WidgetsBindingObserver {
     _peers.clear();
     _inFlight.clear();
     _manualInFlight.clear();
+    _serverSnapshots.clear();
     _publish(SyncPhase.idle);
     if (cleanupError != null) {
       throw StateError(
@@ -242,7 +249,7 @@ class SyncService extends WidgetsBindingObserver {
             type: _serviceType,
             port: port,
             txt: {
-              'v': Uint8List.fromList(utf8.encode('1')),
+              'v': Uint8List.fromList(utf8.encode('$_protocolVersion')),
               'hh': Uint8List.fromList(utf8.encode(_householdHash!)),
               'mid': Uint8List.fromList(utf8.encode(memberId)),
             },
@@ -410,6 +417,19 @@ class SyncService extends WidgetsBindingObserver {
       (error is HttpException &&
           RegExp(r'\(5\d{2}\)$').hasMatch(error.message));
 
+  Future<T> _retryTransfer<T>(Future<T> Function() transfer) async {
+    var attempt = 0;
+    while (true) {
+      try {
+        return await transfer();
+      } catch (error) {
+        if (!_isRetryable(error) || attempt >= 3) rethrow;
+        await Future<void>.delayed(Duration(seconds: 1 << attempt));
+        attempt++;
+      }
+    }
+  }
+
   Future<void> syncWith(Uri peer) async {
     for (final discoveredPeer in _peers.values) {
       if (discoveredPeer.endpoints.any(
@@ -495,15 +515,86 @@ class SyncService extends WidgetsBindingObserver {
         authenticatedPeerId.isEmpty ||
         authenticatedPeerId == memberId ||
         verification['nonce'] != nonce ||
+        verification['protocol_version'] != _protocolVersion ||
         (expectedPeerId != null && authenticatedPeerId != expectedPeerId)) {
+      if (verification['protocol_version'] != _protocolVersion) {
+        throw const FormatException(
+          'El otro dispositivo usa una versión de sincronización incompatible. '
+          'Actualizá ambos dispositivos.',
+        );
+      }
       throw const SyncAuthenticationException();
     }
     if (generation != _generation) return;
-    final requestData = {
+    final requestData = <String, Object?>{
       ...await _store.requestFor(peer.host, peerId: authenticatedPeerId),
       'member_id': memberId,
       'household_hash': householdHash,
     };
+    final locallyAvailable = await _imageStorage.availableHashes();
+    requestData['changes'] =
+        _sanitizeChanges(requestData['changes'], locallyAvailable);
+    requestData['image_hashes'] = locallyAvailable.toList()..sort();
+    final manifest = await _postSigned(
+      peer,
+      path: '/sync/manifest',
+      householdHash: householdHash,
+      memberId: memberId,
+      secret: secret,
+      bodyData: requestData,
+    );
+    if (manifest['member_id'] != authenticatedPeerId) {
+      throw const SyncAuthenticationException();
+    }
+    final snapshotId = manifest['snapshot_id'];
+    final uploadToServer = _readHashList(manifest['upload_to_server']);
+    final uploadToClient = _readHashList(manifest['upload_to_client']);
+    final outgoingReferences = _referencedHashes(
+      requestData['changes']! as List<Map<String, Object?>>,
+    );
+    final remoteChanges = _sanitizeChanges(
+      manifest['changes'],
+      {...locallyAvailable, ...uploadToClient},
+    );
+    final remoteReferences = _referencedHashes(remoteChanges);
+    if (snapshotId is! String || snapshotId.isEmpty) {
+      throw const FormatException('La negociación de imágenes no es válida');
+    }
+    if (!outgoingReferences.containsAll(uploadToServer) ||
+        !remoteReferences.containsAll(uploadToClient)) {
+      throw const FormatException(
+        'La negociación solicita imágenes fuera de los cambios sincronizados',
+      );
+    }
+    for (final hash in uploadToServer) {
+      final bytes = await _imageStorage.readHash(hash);
+      if (bytes == null) {
+        throw HttpException('Falta el dibujo $hash en este dispositivo');
+      }
+      await _retryTransfer(
+        () => _sendImage(
+          peer,
+          hash: hash,
+          bytes: bytes,
+          householdHash: householdHash,
+          memberId: memberId,
+          secret: secret,
+        ),
+      );
+    }
+    for (final hash in uploadToClient) {
+      final bytes = await _retryTransfer(
+        () => _getImage(
+          peer,
+          hash: hash,
+          householdHash: householdHash,
+          memberId: memberId,
+          secret: secret,
+        ),
+      );
+      await _imageStorage.storeDownloaded(hash, bytes);
+    }
+    requestData['snapshot_id'] = snapshotId;
     final responseData = await _postSigned(
       peer,
       path: '/sync',
@@ -514,6 +605,12 @@ class SyncService extends WidgetsBindingObserver {
     );
     if (responseData['member_id'] != authenticatedPeerId) {
       throw const SyncAuthenticationException();
+    }
+    if (responseData['cursor'] != manifest['cursor'] ||
+        jsonEncode(responseData['changes']) != jsonEncode(manifest['changes'])) {
+      throw const FormatException(
+        'Las filas sincronizadas no coinciden con la negociación de imágenes',
+      );
     }
     if (generation != _generation) return;
     await _store.applyResponse(
@@ -595,6 +692,146 @@ class SyncService extends WidgetsBindingObserver {
     return responseData;
   }
 
+  List<String> _readHashList(Object? value) {
+    if (value is! List || value.any((entry) => entry is! String)) {
+      throw const FormatException('La lista de imágenes no es válida');
+    }
+    final hashes = value.cast<String>();
+    if (hashes.any((hash) => !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash))) {
+      throw const FormatException('La lista contiene un hash inválido');
+    }
+    return hashes;
+  }
+
+  Future<void> _sendImage(
+    Uri peer, {
+    required String hash,
+    required Uint8List bytes,
+    required String householdHash,
+    required String memberId,
+    required List<int> secret,
+  }) async {
+    await _sendSignedBinary(
+      peer,
+      method: 'POST',
+      path: '/sync/images/$hash',
+      bytes: bytes,
+      householdHash: householdHash,
+      memberId: memberId,
+      secret: secret,
+    );
+  }
+
+  Future<Uint8List> _getImage(
+    Uri peer, {
+    required String hash,
+    required String householdHash,
+    required String memberId,
+    required List<int> secret,
+  }) async {
+    final requestUri = peer.replace(
+      path: '/sync/images/$hash',
+      query: null,
+      fragment: null,
+      port: peer.hasPort ? peer.port : port,
+    );
+    final request = await _client.getUrl(requestUri).timeout(
+          const Duration(seconds: 15),
+        );
+    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    request.headers
+      ..set('X-Household', householdHash)
+      ..set('X-Member', memberId)
+      ..set('X-Time', timestamp)
+      ..set('X-Signature', _signature(secret, timestamp, ''));
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    final bytes = await _readBytes(response, _maxImageBytes).timeout(
+      const Duration(seconds: 30),
+    );
+    if (response.statusCode != HttpStatus.ok) {
+      _throwHttpStatus(response.statusCode, requestUri);
+    }
+    final responseTime = response.headers.value('X-Time');
+    final responseSignature = response.headers.value('X-Signature');
+    if (responseTime == null ||
+        responseSignature == null ||
+        response.headers.value('X-Household') != householdHash ||
+        !_verify(secret, responseTime, bytes, responseSignature)) {
+      throw const FormatException('La imagen recibida no está autenticada');
+    }
+    if (sha256.convert(bytes).toString() != hash) {
+      throw const FormatException('El hash de la imagen descargada no coincide');
+    }
+    return bytes;
+  }
+
+  Future<void> _sendSignedBinary(
+    Uri peer, {
+    required String method,
+    required String path,
+    required Uint8List bytes,
+    required String householdHash,
+    required String memberId,
+    required List<int> secret,
+  }) async {
+    final requestUri = peer.replace(
+      path: path,
+      query: null,
+      fragment: null,
+      port: peer.hasPort ? peer.port : port,
+    );
+    final request = await _client.openUrl(method, requestUri).timeout(
+          const Duration(seconds: 15),
+        );
+    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    request.headers
+      ..set(HttpHeaders.contentTypeHeader, 'image/png')
+      ..set('X-Household', householdHash)
+      ..set('X-Member', memberId)
+      ..set('X-Time', timestamp)
+      ..set('X-Signature', _signature(secret, timestamp, bytes));
+    request.add(bytes);
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    final responseBytes = await _readBytes(response, _maxBodyBytes).timeout(
+      const Duration(seconds: 30),
+    );
+    if (response.statusCode != HttpStatus.ok) {
+      _throwHttpStatus(response.statusCode, requestUri);
+    }
+    final responseTime = response.headers.value('X-Time');
+    final responseSignature = response.headers.value('X-Signature');
+    if (responseTime == null ||
+        responseSignature == null ||
+        response.headers.value('X-Household') != householdHash ||
+        !_verify(secret, responseTime, responseBytes, responseSignature)) {
+      throw const FormatException('La respuesta de imagen no está autenticada');
+    }
+  }
+
+  void _throwHttpStatus(int statusCode, Uri uri) {
+    if (statusCode == HttpStatus.unauthorized) {
+      throw const SyncAuthenticationException();
+    }
+    if (statusCode >= 400 && statusCode < 500) {
+      throw FormatException('El otro dispositivo rechazó la solicitud ($statusCode)');
+    }
+    throw HttpException('El otro dispositivo respondió con un error ($statusCode)', uri: uri);
+  }
+
+  Future<Uint8List> _readBytes(
+    Stream<List<int>> stream,
+    int maxBytes,
+  ) async {
+    final builder = BytesBuilder(copy: false);
+    var length = 0;
+    await for (final chunk in stream) {
+      length += chunk.length;
+      if (length > maxBytes) throw const _BodyTooLargeException();
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
   Future<void> _handleVerification(HttpRequest request) async {
     try {
       final body = await _readBody(request);
@@ -634,6 +871,7 @@ class SyncService extends WidgetsBindingObserver {
           'member_id': memberId,
           'household_hash': householdHash,
           'nonce': decoded['nonce'],
+          'protocol_version': _protocolVersion,
         },
       );
     } on _BodyTooLargeException {
@@ -656,6 +894,21 @@ class SyncService extends WidgetsBindingObserver {
   Future<void> _handleRequest(HttpRequest request) async {
     if (request.method == 'POST' && request.uri.path == '/sync/verify') {
       await _handleVerification(request);
+      return;
+    }
+    if (request.method == 'POST' && request.uri.path == '/sync/manifest') {
+      await _handleManifest(request);
+      return;
+    }
+    final imagePath =
+        RegExp(r'^/sync/images/([0-9a-f]{64})$').firstMatch(request.uri.path);
+    if (imagePath != null &&
+        (request.method == 'POST' || request.method == 'GET')) {
+      if (request.method == 'POST') {
+        await _handleImageUpload(request, imagePath.group(1)!);
+      } else {
+        await _handleImageDownload(request, imagePath.group(1)!);
+      }
       return;
     }
     if (request.method != 'POST' || request.uri.path != '/sync') {
@@ -695,6 +948,29 @@ class SyncService extends WidgetsBindingObserver {
           decoded['household_hash'] != householdHash) {
         throw const SyncAuthenticationException();
       }
+      final snapshotId = decoded['snapshot_id'];
+      if (snapshotId is! String) {
+        throw const FormatException(
+          'An image manifest is required before sync',
+        );
+      }
+      final snapshot = _serverSnapshots[snapshotId];
+      if (snapshot == null ||
+          snapshot.senderId != senderId ||
+          DateTime.now().difference(snapshot.createdAt) >
+              const Duration(minutes: 5)) {
+        throw const FormatException('The image manifest expired');
+      }
+      final requestData = Map<String, Object?>.from(decoded)
+        ..remove('snapshot_id');
+      if (jsonEncode(requestData) != jsonEncode(snapshot.requestData)) {
+        throw const FormatException('Sync rows differ from image manifest');
+      }
+      for (final hash in snapshot.uploadToServer) {
+        if (await _imageStorage.readHash(hash) == null) {
+          throw const FormatException('A negotiated image is missing');
+        }
+      }
       if (generation != _generation || _server == null) {
         request.response.statusCode = HttpStatus.serviceUnavailable;
         await request.response.close();
@@ -702,8 +978,11 @@ class SyncService extends WidgetsBindingObserver {
       }
       final result = await _store.exchange(
         senderId,
-        Map<String, Object?>.from(decoded),
+        requestData,
+        responseChanges: snapshot.responseChanges,
+        responseCursor: snapshot.responseCursor,
       );
+      _serverSnapshots.remove(snapshotId);
       final memberId = await _appDatabase.readLocalState('member_id');
       if (memberId == null) throw StateError('Missing local member identity');
       await _writeSignedResponse(
@@ -735,6 +1014,246 @@ class SyncService extends WidgetsBindingObserver {
     }
   }
 
+  Future<void> _handleManifest(HttpRequest request) async {
+    try {
+      final body = await _readBody(request);
+      final identity = await _authenticatedIdentity(request, utf8.encode(body));
+      final decoded = jsonDecode(body);
+      if (decoded is! Map<String, dynamic> ||
+          decoded['member_id'] != identity.memberId ||
+          decoded['household_hash'] != identity.householdHash) {
+        throw const SyncAuthenticationException();
+      }
+      final requestData = Map<String, Object?>.from(decoded);
+      final since = requestData['since'];
+      if (since is! int || since < 0) {
+        throw const FormatException('Invalid manifest cursor');
+      }
+      final clientHashes = _readHashList(requestData['image_hashes']).toSet();
+      final clientChanges =
+          _sanitizeChanges(requestData['changes'], clientHashes);
+      requestData['changes'] = clientChanges;
+
+      final snapshot = await _store.snapshotAfter(since);
+      final serverHashes = await _imageStorage.availableHashes();
+      final serverChanges =
+          _sanitizeChanges(snapshot.changes, serverHashes);
+      final clientReferences = _referencedHashes(clientChanges);
+      final serverReferences = _referencedHashes(serverChanges);
+      final uploadToServer = SyncImageNegotiation.missingHashes(
+        referenced: clientReferences,
+        available: serverHashes,
+      );
+      final uploadToClient = SyncImageNegotiation.missingHashes(
+        referenced: serverReferences,
+        available: clientHashes,
+      );
+      final snapshotId = base64UrlEncode(
+        List<int>.generate(24, (_) => Random.secure().nextInt(256)),
+      );
+      _serverSnapshots[snapshotId] = _ServerSnapshot(
+        senderId: identity.memberId,
+        createdAt: DateTime.now(),
+        requestData: requestData,
+        responseChanges: serverChanges,
+        responseCursor: snapshot.cursor,
+        uploadToServer: uploadToServer,
+        uploadToClient: uploadToClient,
+      );
+      _pruneSnapshots();
+      final memberId = await _appDatabase.readLocalState('member_id');
+      if (memberId == null) throw StateError('Missing local member identity');
+      await _writeSignedResponse(
+        request.response,
+        identity.secret,
+        identity.householdId,
+        {
+          'member_id': memberId,
+          'household_hash': identity.householdHash,
+          'snapshot_id': snapshotId,
+          'changes': serverChanges,
+          'cursor': snapshot.cursor,
+          'upload_to_server': uploadToServer,
+          'upload_to_client': uploadToClient,
+        },
+      );
+    } on _BodyTooLargeException {
+      request.response.statusCode = HttpStatus.requestEntityTooLarge;
+      await request.response.close();
+    } on SyncAuthenticationException {
+      request.response.statusCode = HttpStatus.unauthorized;
+      await request.response.close();
+    } on FormatException catch (error) {
+      request.response.statusCode = HttpStatus.badRequest;
+      request.response.write(error.message);
+      await request.response.close();
+    } catch (error, stackTrace) {
+      stderr.writeln('Sync manifest failed: $error\n$stackTrace');
+      request.response.statusCode = HttpStatus.internalServerError;
+      await request.response.close();
+    }
+  }
+
+  Future<void> _handleImageUpload(HttpRequest request, String hash) async {
+    try {
+      final bytes = await _readBytes(request, _maxImageBytes);
+      final identity = await _authenticatedIdentity(request, bytes);
+      if (sha256.convert(bytes).toString() != hash) {
+        throw const FormatException('Image hash does not match its contents');
+      }
+      if (!_serverSnapshots.values.any(
+        (snapshot) =>
+            snapshot.senderId == identity.memberId &&
+            snapshot.uploadToServer.contains(hash) &&
+            DateTime.now().difference(snapshot.createdAt) <=
+                const Duration(minutes: 5),
+      )) {
+        throw const FormatException('Image was not requested by a manifest');
+      }
+      await _imageStorage.storeDownloaded(hash, bytes);
+      await _writeSignedBinaryResponse(
+        request.response,
+        identity.secret,
+        identity.householdId,
+        Uint8List(0),
+      );
+    } on _BodyTooLargeException {
+      request.response.statusCode = HttpStatus.requestEntityTooLarge;
+      await request.response.close();
+    } on SyncAuthenticationException {
+      request.response.statusCode = HttpStatus.unauthorized;
+      await request.response.close();
+    } on FormatException catch (error) {
+      request.response.statusCode = HttpStatus.badRequest;
+      request.response.write(error.message);
+      await request.response.close();
+    } catch (error, stackTrace) {
+      stderr.writeln('Sync image upload failed: $error\n$stackTrace');
+      request.response.statusCode = HttpStatus.internalServerError;
+      await request.response.close();
+    }
+  }
+
+  Future<void> _handleImageDownload(HttpRequest request, String hash) async {
+    try {
+      final identity = await _authenticatedIdentity(request, const []);
+      final isRequested = _serverSnapshots.values.any(
+        (snapshot) =>
+            snapshot.senderId == identity.memberId &&
+            snapshot.uploadToClient.contains(hash) &&
+            DateTime.now().difference(snapshot.createdAt) <=
+                const Duration(minutes: 5),
+      );
+      if (!isRequested) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      final bytes = await _imageStorage.readHash(hash);
+      if (bytes == null) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      await _writeSignedBinaryResponse(
+        request.response,
+        identity.secret,
+        identity.householdId,
+        bytes,
+      );
+    } on SyncAuthenticationException {
+      request.response.statusCode = HttpStatus.unauthorized;
+      await request.response.close();
+    } on FormatException catch (error) {
+      request.response.statusCode = HttpStatus.badRequest;
+      request.response.write(error.message);
+      await request.response.close();
+    } catch (error, stackTrace) {
+      stderr.writeln('Sync image download failed: $error\n$stackTrace');
+      request.response.statusCode = HttpStatus.internalServerError;
+      await request.response.close();
+    }
+  }
+
+  Future<_AuthenticatedRequest> _authenticatedIdentity(
+    HttpRequest request,
+    List<int> body,
+  ) async {
+    final householdId = await _store.householdId;
+    final secretValue = await _appDatabase.readLocalState('household_secret');
+    final memberId = request.headers.value('X-Member');
+    final timestamp = request.headers.value('X-Time');
+    final signature = request.headers.value('X-Signature');
+    final householdHash = request.headers.value('X-Household');
+    if (householdId == null ||
+        secretValue == null ||
+        memberId == null ||
+        memberId.isEmpty ||
+        memberId.length > 128 ||
+        timestamp == null ||
+        signature == null ||
+        householdHash != _householdHashFor(householdId) ||
+        !_verifyBytes(_decodeSecret(secretValue), timestamp, body, signature)) {
+      throw const SyncAuthenticationException();
+    }
+    return _AuthenticatedRequest(
+      householdId: householdId,
+      householdHash: householdHash!,
+      memberId: memberId,
+      secret: _decodeSecret(secretValue),
+    );
+  }
+
+  List<Map<String, Object?>> _sanitizeChanges(
+    Object? value,
+    Set<String> availableHashes,
+  ) {
+    if (value is! List) throw const FormatException('changes must be a list');
+    return value.map((change) {
+      if (change is! Map ||
+          change['table'] is! String ||
+          change['row'] is! Map) {
+        throw const FormatException('Invalid change record');
+      }
+      final table = change['table'] as String;
+      final row = Map<String, Object?>.from(change['row'] as Map);
+      if (table == 'product' && row['image_src'] != null) {
+        if (row['image_src'] is! String) {
+          throw const FormatException('Invalid product image');
+        }
+        final hash = _imageStorage.hashFromSource(row['image_src'] as String?);
+        if (hash == null) throw const FormatException('Invalid product image');
+        if (!availableHashes.contains(hash)) row['image_src'] = null;
+      }
+      return {'table': table, 'row': row};
+    }).toList();
+  }
+
+  Set<String> _referencedHashes(List<Map<String, Object?>> changes) {
+    final hashes = <String>{};
+    for (final change in changes) {
+      if (change['table'] != 'product') continue;
+      final row = change['row']! as Map<String, Object?>;
+      final hash = _imageStorage.hashFromSource(row['image_src'] as String?);
+      if (hash != null) hashes.add(hash);
+    }
+    return hashes;
+  }
+
+  void _pruneSnapshots() {
+    final now = DateTime.now();
+    _serverSnapshots.removeWhere(
+      (_, snapshot) =>
+          now.difference(snapshot.createdAt) > const Duration(minutes: 5),
+    );
+    while (_serverSnapshots.length > 8) {
+      final oldest = _serverSnapshots.entries.reduce(
+        (a, b) => a.value.createdAt.isBefore(b.value.createdAt) ? a : b,
+      );
+      _serverSnapshots.remove(oldest.key);
+    }
+  }
+
   Future<void> _writeSignedResponse(
     HttpResponse response,
     List<int> secret,
@@ -753,6 +1272,23 @@ class SyncService extends WidgetsBindingObserver {
     await response.close();
   }
 
+  Future<void> _writeSignedBinaryResponse(
+    HttpResponse response,
+    List<int> secret,
+    String householdId,
+    Uint8List bytes,
+  ) async {
+    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType('image', 'png')
+      ..headers.set('X-Household', _householdHashFor(householdId))
+      ..headers.set('X-Time', timestamp)
+      ..headers.set('X-Signature', _signature(secret, timestamp, bytes));
+    response.add(bytes);
+    await response.close();
+  }
+
   Future<String> _readBody(Stream<List<int>> stream) async {
     final builder = BytesBuilder(copy: false);
     var length = 0;
@@ -767,7 +1303,7 @@ class SyncService extends WidgetsBindingObserver {
   bool _verify(
     List<int> secret,
     String timestampText,
-    String body,
+    Object body,
     String signature,
   ) {
     final timestamp = int.tryParse(timestampText);
@@ -777,6 +1313,29 @@ class SyncService extends WidgetsBindingObserver {
       return false;
     }
     if (signature.length != 64 ||
+        signature.toLowerCase() != signature ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(signature)) {
+      return false;
+    }
+    return _verifyBytes(
+      secret,
+      timestampText,
+      body is String ? utf8.encode(body) : body as List<int>,
+      signature,
+    );
+  }
+
+  bool _verifyBytes(
+    List<int> secret,
+    String timestampText,
+    List<int> body,
+    String signature,
+  ) {
+    final timestamp = int.tryParse(timestampText);
+    if (timestamp == null ||
+        (DateTime.now().toUtc().millisecondsSinceEpoch - timestamp).abs() >
+            _clockToleranceMs ||
+        signature.length != 64 ||
         signature.toLowerCase() != signature ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(signature)) {
       return false;
@@ -796,8 +1355,12 @@ class SyncService extends WidgetsBindingObserver {
   String _householdHashFor(String householdId) =>
       sha256.convert(utf8.encode(householdId)).toString();
 
-  String _signature(List<int> secret, String timestamp, String body) =>
-      Hmac(sha256, secret).convert(utf8.encode('$timestamp\n$body')).toString();
+  String _signature(List<int> secret, String timestamp, Object body) {
+    final bodyBytes = body is String ? utf8.encode(body) : body as List<int>;
+    return Hmac(sha256, secret)
+        .convert([...utf8.encode('$timestamp\n'), ...bodyBytes])
+        .toString();
+  }
 
   bool _constantTimeEquals(String expected, String actual) {
     if (expected.length != actual.length) return false;
@@ -827,4 +1390,38 @@ class SyncAuthenticationException implements Exception {
 
 class _BodyTooLargeException implements Exception {
   const _BodyTooLargeException();
+}
+
+class _AuthenticatedRequest {
+  const _AuthenticatedRequest({
+    required this.householdId,
+    required this.householdHash,
+    required this.memberId,
+    required this.secret,
+  });
+
+  final String householdId;
+  final String householdHash;
+  final String memberId;
+  final List<int> secret;
+}
+
+class _ServerSnapshot {
+  const _ServerSnapshot({
+    required this.senderId,
+    required this.createdAt,
+    required this.requestData,
+    required this.responseChanges,
+    required this.responseCursor,
+    required this.uploadToServer,
+    required this.uploadToClient,
+  });
+
+  final String senderId;
+  final DateTime createdAt;
+  final Map<String, Object?> requestData;
+  final List<Map<String, Object?>> responseChanges;
+  final int responseCursor;
+  final List<String> uploadToServer;
+  final List<String> uploadToClient;
 }

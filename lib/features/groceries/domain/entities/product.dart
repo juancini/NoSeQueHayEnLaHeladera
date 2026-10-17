@@ -9,6 +9,7 @@ class Product {
     this.lastBoughtAt,
     this.lastEmptiedAt,
     this.deletedAt,
+    this.imageSrc,
   });
 
   final String id;
@@ -18,6 +19,7 @@ class Product {
   final int? lastEmptiedAt;
   final int updatedAt;
   final int? deletedAt;
+  final String? imageSrc;
   final int sequence;
   final String lastWriterMemberId;
 
@@ -37,6 +39,7 @@ class Product {
         lastEmptiedAt: row['last_emptied_at'] as int?,
         updatedAt: row['updated_at']! as int,
         deletedAt: row['deleted_at'] as int?,
+        imageSrc: row['image_src'] as String?,
         sequence: row['seq']! as int,
         lastWriterMemberId:
             row['last_writer_member_id'] as String? ?? '',

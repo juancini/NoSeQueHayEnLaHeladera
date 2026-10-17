@@ -62,7 +62,7 @@ A standalone copy of this diagram is in [`architecture.svg`](./architecture.svg)
  
 Key points:
  
-1. **UI → backend is not HTTP.** UI and logic live in the same process, so the "API" is a Dart repository class. The only network-reachable endpoints are `POST /sync/verify` and `POST /sync`.
+1. **UI → backend is not HTTP.** UI and logic live in the same process, so the "API" is a Dart repository class. The network-reachable endpoints are signed sync and image-transfer routes.
 2. **mDNS is discovery only.** It returns `ip:port` of peers in the household. The actual sync is a direct HTTP request to that address.
 3. **Sync triggers**: app comes to foreground, a peer appears via mDNS, and after a local write (debounced). iOS can't sync in the background, and that's fine.
 
@@ -94,7 +94,8 @@ CREATE TABLE product (
   last_emptied_at  INTEGER,                 -- NULL = never marked empty
   updated_at       INTEGER NOT NULL,        -- covers name, lasts_days, deleted_at
   deleted_at       INTEGER,                 -- soft delete
-  seq              INTEGER NOT NULL
+  seq              INTEGER NOT NULL,
+  image_src        TEXT                     -- drawings/<sha256>.png, nullable
 );
  
 -- Local only, never synced
@@ -112,6 +113,9 @@ CREATE TABLE local_state (
 
 Existing unassigned local products are assigned to a household when one is
 created or joined. New products can only be added after a household exists.
+Schema version 2 adds nullable `product.image_src`; version 1 installs are
+migrated in place. PNG files live under the app documents directory in
+`drawings/`, named by their SHA-256. Product rows store only the relative path.
  
 ```mermaid
 erDiagram
@@ -128,6 +132,7 @@ erDiagram
     int updated_at
     int deleted_at
     int seq
+    text image_src
   }
   PRODUCT {
     text id PK
@@ -170,6 +175,7 @@ Merging is per row, when an incoming row `r` meets a local row `l` with the same
 | `last_bought_at` | `max(l, r)` (NULL counts as smallest) |
 | `last_emptied_at` | `max(l, r)` |
 | `name`, `lasts_days`, `deleted_at` | take the whole group from the row with the greater `updated_at`; tie-break by the greater `member_id` of the last writer |
+| `image_src` | immutable after creation: keep a local non-null reference, otherwise adopt the incoming reference |
  
 Consequences:
  
@@ -197,12 +203,17 @@ sequenceDiagram
   Note over A,B: Discovery gives a route, not proof of identity#59; no list rows are sent yet
   A->>B: POST /sync/verify + timestamped HMAC + random nonce
   B->>B: Validate HMAC, timestamp, household and request identity
-  B-->>A: Signed member ID, household hash and echoed nonce
+  B-->>A: Signed member ID, household hash, version 2 and echoed nonce
   A->>A: Validate signature, nonce and advertised member ID
-  A->>A: Read this peer's cursors and select outgoing changes
-  A->>B: POST /sync {since, cursor, changes} + timestamped HMAC
-  B->>B: Validate request and transactionally merge incoming rows
-  B->>B: Select rows newer than since and record peer cursors
+  A->>A: Read cursors and select bounded outgoing changes
+  A->>B: POST /sync/manifest {cursors, changes, available hashes}
+  B->>B: Read-only snapshot of bounded rows in both directions
+  B-->>A: Signed snapshot token, changes and missing image hashes
+  A->>B: POST /sync/images/<hash> (signed raw PNG)
+  A->>B: GET /sync/images/<hash> (signed request)
+  B-->>A: Signed raw PNG
+  A->>B: POST /sync {snapshot token, same changes} + HMAC
+  B->>B: Verify all negotiated files, transactionally merge rows/cursors
   B-->>A: Signed {member_id, changes, cursor}
   A->>A: Validate response and transactionally merge rows/update cursors
 ```
@@ -213,8 +224,9 @@ Each phone runs the same two network roles at once:
 
 - **HTTP server:** when local sync is activated, the app binds an HTTP server to
   all IPv4 interfaces (`0.0.0.0`) on port `47622`. This lets another device on
-  the local network reach it. The server exposes only `POST /sync/verify` and
-  `POST /sync`.
+  the local network reach it. The server exposes `POST /sync/verify`,
+  `POST /sync/manifest`, `POST /sync`, and authenticated binary
+  `GET`/`POST /sync/images/<sha256>` routes.
 - **mDNS/DNS-SD advertiser and browser:** each phone registers and searches for
   the service type `_groceries._tcp`. Its DNS-SD TXT metadata contains `v`
   (protocol version), `hh` (SHA-256 hash of the household ID), and `mid` (the
@@ -223,26 +235,31 @@ Each phone runs the same two network roles at once:
 
 mDNS/DNS-SD is local-network service discovery: it lets a device ask which
 nearby devices offer a named service and resolves those services to reachable
-addresses and a port. It avoids guessing or scanning IP ranges. The app accepts
-only version `1`, a matching household hash, a different member ID, a valid
-port, and usable resolved addresses. The stable member ID identifies a peer;
-its IP address is only a replaceable route and may change.
+addresses and a port. It avoids guessing or scanning IP ranges. Image sync
+requires protocol version `2`, a matching household hash, a different member
+ID, a valid port, and usable resolved addresses. Version 1 advertisements are
+recognized so those peers receive an explicit incompatible-version response.
+The stable member ID identifies a peer; its IP address is only a replaceable
+route and may change.
 
 Discovery metadata is not trusted authentication. Another device can observe
 or forge an advertisement, so the app first sends `POST /sync/verify` with no
 list data. That request and its response are signed with the household's shared
 secret using HMAC-SHA256 and a timestamp. The client also includes a fresh
-random nonce; the response must echo it and identify the same member ID that
-mDNS advertised. Only after these checks pass does the client send `POST /sync`.
-The sync response is also signed and checked before any received rows are
-applied.
+random nonce; the response must echo it, identify the same member ID that
+mDNS advertised, and declare protocol version 2. Older peers are rejected
+with an explicit update-both-devices error.
 
-The data exchange is symmetric: either phone can initiate it, and both phones
-may initiate at the same time. In one request, the initiator sends its changes
-and asks for changes from the other phone. The receiver applies the incoming
-changes and returns its own changes; the initiator then applies that response.
-Each side validates rows and updates its database and per-peer cursors in
-transactions. The row merge rules are described in [§4](#4-merge-rules).
+Before row exchange, the initiator sends an authenticated, read-only manifest
+request. It snapshots the exact bounded cursor range for both directions,
+reports missing content-addressed image hashes, and does not update rows or
+cursors. The devices transfer only those PNG files as raw bytes in separate
+signed requests. The existing `/sync` exchange then applies product rows and
+updates peer cursors transactionally. If any required transfer fails, `/sync`
+is not sent. Hashes are verified on upload and temporary files are renamed into
+place atomically. A missing local file is omitted from that exchange's image
+reference, and product merging never replaces an existing image. The row merge
+rules are described in [§4](#4-merge-rules).
 
 Automatic sync begins when a matching peer is discovered, after a local change
 (debounced by 700 ms), when the user selects **Sync now**, or when the app
@@ -253,7 +270,7 @@ is paused and refreshes when it resumes; background sync while the app is
 suspended or closed is not part of v1. If discovery is unavailable, manual IP
 entry remains a troubleshooting fallback.
  
-Both HTTP endpoints use the same signed headers:
+All HTTP requests use the same signed household headers:
  
 ```
 POST /sync/verify
@@ -272,8 +289,15 @@ Response body:
 {
   "member_id":      <responder member id>,
   "household_hash": <household hash>,
-  "nonce":          <same one-time value>
+  "nonce":          <same one-time value>,
+  "protocol_version": 2
 }
+
+POST /sync/manifest
+Request body: the ordinary `since`, `cursor`, and bounded `changes`, plus
+`image_hashes` listing valid files currently held by the requester. The signed
+response contains a `snapshot_id`, remote bounded `changes` and `cursor`, and
+`upload_to_server` / `upload_to_client` lists. This step is read-only.
 
 POST /sync
 Request body:
@@ -282,7 +306,9 @@ Request body:
   "household_hash": <household hash>,
   "since":          <number>,        // my pull_cursor for you: send me your rows with seq > this
   "cursor":         <number>,        // my current max local seq
-  "changes":        [ <row>, ... ]   // my rows with seq > my push_cursor for you
+  "changes":        [ <row>, ... ],  // my rows with seq > my push_cursor for you
+  "image_hashes":   [ <sha256>, ... ],
+  "snapshot_id":    <manifest snapshot token>
 }
  
 Response body:
@@ -295,6 +321,11 @@ Response body:
 ```
  
 Each `row` is tagged with its table (`product` / `member`) and carries all of its columns except the sender's local `seq`.
+Image requests transfer raw PNG bytes, never image bytes or base64 JSON. Their
+timestamped HMAC signatures cover the exact binary body (or an empty body for
+downloads). Product rows carry only a nullable relative `image_src` path.
+Uploads are checked against the path hash, written atomically, and are
+idempotent.
  
 ### Why a local `seq` and not `updated_at` as the cursor
  
@@ -305,11 +336,16 @@ With more than two people, changes relay: A → B, then B → C. A relayed row s
 1. Discover peer via mDNS (or manual IP).
 2. Send a signed `/sync/verify` request with a fresh nonce; verify the signed
    response, its echoed nonce, household hash, and remote member ID.
-3. Build request: `since = peer.pull_cursor`, `changes = rows where seq > peer.push_cursor`.
-4. Send `/sync` and verify the signed response.
-5. Apply `response.changes` with the merge rules, assigning each changed row a new local `seq`.
-6. In one transaction: `peer.pull_cursor = max(old cursor, response.cursor)` and `peer.push_cursor = max seq that was sent`.
-7. The server side does the symmetric steps when it receives a sync request.
+3. Snapshot `since = peer.pull_cursor`, `cursor`, and
+   `changes = rows where seq > peer.push_cursor`.
+4. Exchange a signed, read-only `/sync/manifest`; upload/download its missing
+   raw PNG hashes before sending any product rows.
+5. Send `/sync` with the same bounded request plus the manifest snapshot token;
+   the server applies changes and advances cursors transactionally.
+6. Verify the signed response, apply its bounded changes with the merge rules,
+   assigning each changed row a new local `seq`.
+7. In one transaction, update peer cursors to the snapshot positions. The
+   server side does the symmetric steps when it receives a sync request.
 Rows received from a peer may be echoed back on the next sync. That's harmless, since merging is idempotent. Optimize later if it matters.
  
 ## 6. Pairing and security
@@ -330,10 +366,16 @@ Rows received from a peer may be echoed back on the next sync. That's harmless, 
 ## 7. Repository API
  
 ```dart
+import 'dart:typed_data';
+
 abstract class GroceryRepository {
   Stream<List<Product>> watchProducts();          // all, with derived status
   Stream<List<Product>> watchShoppingList();      // only needs_buying == true
-  Future<Product> addProduct(String name, int lastsDays);
+  Future<Product> addProduct(
+    String name,
+    int lastsDays, {
+    Uint8List? imagePng,
+  });
   Future<void> updateProduct(String id, {String? name, int? lastsDays});
   Future<void> markBought(String id);             // last_bought_at = now
   Future<void> markEmpty(String id);              // last_emptied_at = now
@@ -361,6 +403,8 @@ unassigned rows, which are adopted when a household is created or joined.
 | Concern | Package |
 |---|---|
 | SQLite | `sqflite` |
+| Drawing canvas | `flutter_drawing_board` |
+| App documents directory | `path_provider` |
 | HTTP server / client | Dart `dart:io` (`HttpServer`, `HttpClient`) |
 | mDNS discovery | `nsd` |
 | QR | `qr_flutter` (show), `mobile_scanner` (scan), `app_links` (open invite links) |

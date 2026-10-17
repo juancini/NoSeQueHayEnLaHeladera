@@ -8,6 +8,7 @@ Map<String, Object?> row({
   int? boughtAt,
   int? emptiedAt,
   int? deletedAt,
+  String? imageSrc,
   int lastsDays = 3,
 }) =>
     {
@@ -20,11 +21,13 @@ Map<String, Object?> row({
       'updated_at': updatedAt,
       'deleted_at': deletedAt,
       'last_writer_member_id': writer,
+      'image_src': imageSrc,
     };
 
 void main() {
   group('SyncMergeEngine.mergeProduct', () {
-    test('keeps the newest bought and emptied timestamps from either device', () {
+    test('keeps the newest bought and emptied timestamps from either device',
+        () {
       final merged = SyncMergeEngine.mergeProduct(
         local: row(name: 'Leche', updatedAt: 1, writer: 'a', boughtAt: 100),
         incoming: row(name: 'Leche', updatedAt: 1, writer: 'b', emptiedAt: 200),
@@ -54,13 +57,44 @@ void main() {
     });
 
     test('is idempotent when the merged row is merged again', () {
-      final local = row(name: 'Leche', updatedAt: 10, writer: 'a', boughtAt: 20);
+      final local =
+          row(name: 'Leche', updatedAt: 10, writer: 'a', boughtAt: 20);
       final incoming =
           row(name: 'Leche', updatedAt: 11, writer: 'b', emptiedAt: 25);
-      final once = SyncMergeEngine.mergeProduct(local: local, incoming: incoming);
-      final twice = SyncMergeEngine.mergeProduct(local: once, incoming: incoming);
+      final once =
+          SyncMergeEngine.mergeProduct(local: local, incoming: incoming);
+      final twice =
+          SyncMergeEngine.mergeProduct(local: once, incoming: incoming);
 
       expect(twice, once);
+    });
+
+    test('keeps an existing image and adopts an incoming image only once', () {
+      final fromPeer = row(
+        name: 'Leche',
+        updatedAt: 2,
+        writer: 'b',
+        imageSrc: 'drawings/${'a' * 64}.png',
+      );
+      final local = row(
+        name: 'Leche',
+        updatedAt: 1,
+        writer: 'a',
+        imageSrc: 'drawings/${'b' * 64}.png',
+      );
+
+      expect(
+        SyncMergeEngine.mergeProduct(
+            local: local, incoming: fromPeer)['image_src'],
+        'drawings/${'b' * 64}.png',
+      );
+      expect(
+        SyncMergeEngine.mergeProduct(
+          local: row(name: 'Leche', updatedAt: 1, writer: 'a'),
+          incoming: fromPeer,
+        )['image_src'],
+        'drawings/${'a' * 64}.png',
+      );
     });
   });
 }

@@ -15,11 +15,12 @@ class AppDatabase {
   final _changes = StreamController<void>.broadcast();
   final _localChanges = StreamController<void>.broadcast();
 
-  static Future<AppDatabase> open() async {
-    final dbPath = path.join(await getDatabasesPath(), 'heladera.sqlite');
+  static Future<AppDatabase> open({String? databasePath}) async {
+    final dbPath = databasePath ??
+        path.join(await getDatabasesPath(), 'heladera.sqlite');
     final database = await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {
         await db.execute('''
@@ -49,7 +50,8 @@ class AppDatabase {
             updated_at INTEGER NOT NULL,
             deleted_at INTEGER,
             seq INTEGER NOT NULL,
-            last_writer_member_id TEXT NOT NULL DEFAULT ''
+            last_writer_member_id TEXT NOT NULL DEFAULT '',
+            image_src TEXT
           )
         ''');
         await db.execute('''
@@ -69,6 +71,11 @@ class AppDatabase {
         await db.execute(
           "INSERT INTO local_state(key, value) VALUES('seq_counter', '0')",
         );
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('ALTER TABLE product ADD COLUMN image_src TEXT');
+        }
       },
     );
     return AppDatabase(database);

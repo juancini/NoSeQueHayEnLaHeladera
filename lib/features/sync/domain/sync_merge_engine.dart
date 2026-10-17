@@ -22,6 +22,7 @@ class SyncMergeEngine {
       'updated_at': winner['updated_at'],
       'deleted_at': winner['deleted_at'],
       'last_writer_member_id': winner['last_writer_member_id'],
+      'image_src': local['image_src'] ?? incoming['image_src'],
     };
   }
 

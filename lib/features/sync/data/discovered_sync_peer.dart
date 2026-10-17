@@ -30,7 +30,7 @@ class DiscoveredSyncPeer {
     final version = _txtValue(txt, 'v');
     final advertisedHousehold = _txtValue(txt, 'hh');
     final memberId = _txtValue(txt, 'mid');
-    if (version != '1' ||
+    if ((version != '1' && version != '2') ||
         advertisedHousehold != householdHash ||
         memberId == null ||
         memberId.isEmpty ||

@@ -1,12 +1,17 @@
 import 'package:sqflite/sqflite.dart';
 
 import '../../../core/database/app_database.dart';
+import '../../groceries/data/drawing_image_storage.dart';
 import '../domain/sync_merge_engine.dart';
 
 class SyncDataStore {
-  SyncDataStore(this._appDatabase);
+  SyncDataStore(
+    this._appDatabase, {
+    DrawingImageStorage? imageStorage,
+  }) : _imageStorage = imageStorage ?? DrawingImageStorage();
 
   final AppDatabase _appDatabase;
+  final DrawingImageStorage _imageStorage;
 
   Future<String?> get householdId async {
     final rows = await _appDatabase.database.query('household', limit: 1);
@@ -28,31 +33,59 @@ class SyncDataStore {
           peerRows.isEmpty ? const <String, Object?>{} : peerRows.first;
       final pullCursor = peer['pull_cursor'] as int? ?? 0;
       final pushCursor = peer['push_cursor'] as int? ?? 0;
-      final changes = await _changesAfter(pushCursor, executor: transaction);
+      final cursor = await _currentSequence(transaction);
+      final changes = await _changesAfter(
+        pushCursor,
+        throughSequence: cursor,
+        executor: transaction,
+      );
       return {
         'since': pullCursor,
-        'cursor': await _currentSequence(transaction),
+        'cursor': cursor,
         'changes': changes,
       };
+    });
+  }
+
+  Future<({int cursor, List<Map<String, Object?>> changes})> snapshotAfter(
+    int since,
+  ) async {
+    return _appDatabase.database.transaction((transaction) async {
+      final cursor = await _currentSequence(transaction);
+      if (since > cursor) {
+        throw const FormatException('since cursor is ahead of this device');
+      }
+      return (
+        cursor: cursor,
+        changes: await _changesAfter(
+          since,
+          throughSequence: cursor,
+          executor: transaction,
+        ),
+      );
     });
   }
 
   Future<Map<String, Object?>> exchange(
     String senderId,
     Map<String, Object?> request,
-  ) async {
+    {
+    required List<Map<String, Object?>> responseChanges,
+    required int responseCursor,
+  }) async {
     final since = _nonNegativeInt(request['since'], 'since');
     final senderCursor = _nonNegativeInt(request['cursor'], 'cursor');
     final changes = _readChangeList(request['changes']);
-    late List<Map<String, Object?>> outgoing;
-    late int cursor;
+    final cleanupImages = <String>{};
     await _appDatabase.database.transaction((transaction) async {
       final currentSequence = await _currentSequence(transaction);
       if (since > currentSequence) {
         throw const FormatException('since cursor is ahead of this device');
       }
-      await _applyChanges(transaction, changes);
-      outgoing = await _changesAfter(since, executor: transaction);
+      if (responseCursor > currentSequence) {
+        throw const FormatException('Snapshot cursor is ahead of this device');
+      }
+      await _applyChanges(transaction, changes, cleanupImages);
       final peerRows = await transaction.query(
         'peer',
         where: 'member_id = ?',
@@ -67,16 +100,17 @@ class SyncDataStore {
           'member_id': senderId,
           'pull_cursor':
               _maxInt(oldPeer['pull_cursor'] as int? ?? 0, senderCursor),
-          'push_cursor': _maxInt(oldPeer['push_cursor'] as int? ?? 0, since),
+          'push_cursor':
+              _maxInt(oldPeer['push_cursor'] as int? ?? 0, responseCursor),
           'address': oldPeer['address'],
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
       await _recordSuccessfulSync(transaction);
-      cursor = await _currentSequence(transaction);
     });
     _appDatabase.notifyChanged(local: false);
-    return {'changes': outgoing, 'cursor': cursor};
+    await _cleanupAfterTransaction(cleanupImages);
+    return {'changes': responseChanges, 'cursor': responseCursor};
   }
 
   Future<void> applyResponse({
@@ -87,8 +121,9 @@ class SyncDataStore {
   }) async {
     final cursor = _nonNegativeInt(response['cursor'], 'cursor');
     final changes = _readChangeList(response['changes']);
+    final cleanupImages = <String>{};
     await _appDatabase.database.transaction((transaction) async {
-      await _applyChanges(transaction, changes);
+      await _applyChanges(transaction, changes, cleanupImages);
       final rows = await transaction.query(
         'peer',
         where: 'member_id = ?',
@@ -115,6 +150,7 @@ class SyncDataStore {
       await _recordSuccessfulSync(transaction);
     });
     _appDatabase.notifyChanged(local: false);
+    await _cleanupAfterTransaction(cleanupImages);
   }
 
   Future<void> _recordSuccessfulSync(Transaction transaction) async {
@@ -141,6 +177,7 @@ class SyncDataStore {
 
   Future<List<Map<String, Object?>>> _changesAfter(
     int sequence, {
+    int? throughSequence,
     DatabaseExecutor? executor,
   }) async {
     final db = executor ?? _appDatabase.database;
@@ -149,14 +186,22 @@ class SyncDataStore {
     final householdId = households.first['id'] as String;
     final products = await db.query(
       'product',
-      where: 'household_id = ? AND seq > ?',
-      whereArgs: [householdId, sequence],
+      where: throughSequence == null
+          ? 'household_id = ? AND seq > ?'
+          : 'household_id = ? AND seq > ? AND seq <= ?',
+      whereArgs: throughSequence == null
+          ? [householdId, sequence]
+          : [householdId, sequence, throughSequence],
       orderBy: 'seq ASC',
     );
     final members = await db.query(
       'member',
-      where: 'household_id = ? AND seq > ?',
-      whereArgs: [householdId, sequence],
+      where: throughSequence == null
+          ? 'household_id = ? AND seq > ?'
+          : 'household_id = ? AND seq > ? AND seq <= ?',
+      whereArgs: throughSequence == null
+          ? [householdId, sequence]
+          : [householdId, sequence, throughSequence],
       orderBy: 'seq ASC',
     );
     final changes = <(int, Map<String, Object?>)>[
@@ -192,6 +237,7 @@ class SyncDataStore {
   Future<void> _applyChanges(
     Transaction transaction,
     List<Map<String, Object?>> changes,
+    Set<String> cleanupImages,
   ) async {
     final currentHouseholdId = await _householdId(transaction);
     if (currentHouseholdId == null) {
@@ -201,7 +247,12 @@ class SyncDataStore {
       final table = change['table'] as String;
       final incoming = change['row']! as Map<String, Object?>;
       if (table == 'product') {
-        await _applyProduct(transaction, currentHouseholdId, incoming);
+        await _applyProduct(
+          transaction,
+          currentHouseholdId,
+          incoming,
+          cleanupImages,
+        );
       } else if (table == 'member') {
         await _applyMember(transaction, currentHouseholdId, incoming);
       } else {
@@ -214,6 +265,7 @@ class SyncDataStore {
     Transaction transaction,
     String householdId,
     Map<String, Object?> source,
+    Set<String> cleanupImages,
   ) async {
     final incoming = _validatedProduct(source, householdId);
     final rows = await transaction.query(
@@ -231,6 +283,10 @@ class SyncDataStore {
     final merged = existing == null
         ? incoming
         : SyncMergeEngine.mergeProduct(local: existing, incoming: incoming);
+    final mergedImage = merged['image_src'] as String?;
+    if (merged['deleted_at'] != null && mergedImage != null) {
+      cleanupImages.add(mergedImage);
+    }
     if (existing != null && _sameProduct(existing, merged)) return;
     final sequence = await _appDatabase.nextSequence(transaction);
     await transaction.insert(
@@ -254,7 +310,9 @@ class SyncDataStore {
         row['last_writer_member_id'] is! String ||
         !_isNullableInt(row['last_bought_at']) ||
         !_isNullableInt(row['last_emptied_at']) ||
-        !_isNullableInt(row['deleted_at'])) {
+        !_isNullableInt(row['deleted_at']) ||
+        (row['image_src'] != null &&
+            _imageStorage.hashFromSource(row['image_src'] as String?) == null)) {
       throw const FormatException('Invalid product row');
     }
     return {
@@ -267,6 +325,7 @@ class SyncDataStore {
       'updated_at': row['updated_at'],
       'deleted_at': row['deleted_at'],
       'last_writer_member_id': row['last_writer_member_id'],
+      'image_src': row['image_src'],
     };
   }
 
@@ -281,6 +340,7 @@ class SyncDataStore {
       'updated_at',
       'deleted_at',
       'last_writer_member_id',
+      'image_src',
     ];
     return fields.every((field) => local[field] == merged[field]);
   }
@@ -369,4 +429,17 @@ class SyncDataStore {
   int _deletedAtOrder(int? timestamp) => timestamp ?? -1;
 
   int _maxInt(int first, int second) => first >= second ? first : second;
+
+  Future<void> _cleanupAfterTransaction(Set<String> imageSources) async {
+    for (final imageSrc in imageSources) {
+      final references = await _appDatabase.database.query(
+        'product',
+        columns: ['id'],
+        where: 'image_src = ? AND deleted_at IS NULL',
+        whereArgs: [imageSrc],
+        limit: 1,
+      );
+      if (references.isEmpty) await _imageStorage.delete(imageSrc);
+    }
+  }
 }

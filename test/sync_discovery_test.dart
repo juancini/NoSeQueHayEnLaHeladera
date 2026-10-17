@@ -63,7 +63,9 @@ void main() {
     );
   });
 
-  test('rejects services from a different household or protocol version', () {
+  test(
+      'rejects services from a different household or unknown protocol version',
+      () {
     expect(
       DiscoveredSyncPeer.parse(
         service(advertisedHousehold: 'other-household'),
@@ -74,12 +76,25 @@ void main() {
     );
     expect(
       DiscoveredSyncPeer.parse(
-        service(version: '2'),
+        service(version: '3'),
         householdHash: householdHash,
         localMemberId: localMemberId,
       ),
       isNull,
     );
+  });
+
+  test('accepts both the legacy peer advertisement and image sync version', () {
+    for (final version in ['1', '2']) {
+      expect(
+        DiscoveredSyncPeer.parse(
+          service(version: version),
+          householdHash: householdHash,
+          localMemberId: localMemberId,
+        ),
+        isNotNull,
+      );
+    }
   });
 
   test('rejects this device, invalid identities, endpoints, and service types',
