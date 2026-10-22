@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:no_se_que_hay_en_la_heladera/app/app.dart';
@@ -22,6 +23,13 @@ void main() {
     expect(find.text('No se que hay en la heladerApp'), findsOneWidget);
     expect(find.text('Creá o unite a un hogar para agregar productos.'),
         findsOneWidget);
+    final theme = Theme.of(
+      tester.element(
+          find.text('Creá o unite a un hogar para agregar productos.')),
+    );
+    expect(theme.textTheme.bodyMedium?.fontWeight, FontWeight.bold);
+    expect(theme.textTheme.titleMedium?.fontWeight, FontWeight.bold);
+    expect(theme.primaryTextTheme.bodyMedium?.fontWeight, FontWeight.bold);
     expect(tester.takeException(), isNull);
   });
 }

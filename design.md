@@ -44,8 +44,11 @@ An app that remembers for you what needs to be bought for the house!
 - Fade the icons toward the center with an elliptical radial mask: about 6%
   opacity in the center, ramping to full visibility near the edges. Keep the
   mask on the icons only so the base color remains solid.
-- Keep the palette in the app theme and ensure the background does not intercept
-  input or draw over screen content.
+- Add a subtle, static paper grain over the base and icon layers, beneath screen
+  content. The texture must not intercept input or distract from the UI.
+- Keep the base background color in the app theme. Icon color is baked into the
+  SVG fills, so update those fills when changing the icon palette. Ensure the
+  background does not intercept input or draw over screen content.
 
 - **Sync with other people in the household**
   - Over local WiFi / LAN, no server, no third parties.
