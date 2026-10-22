@@ -33,6 +33,20 @@ An app that remembers for you what needs to be bought for the house!
 - Keep the **Todo / Para comprar** filter, **Agregar** flow, and household and
   people management button available on the home screen.
 
+### App background
+
+- Use a shared decorative background across the app, behind screen content.
+- The base color is warm beige (`#f5f0df`) with scattered kitchen-style SVG
+  icons in gold (`#eec364`): spoon, fork, mug, heart, and star. Do not use
+  knives or other sharp utensils; preserve the mug and spoon's white highlights.
+- Scatter icons deterministically for each screen size, with a minimum gap
+  between their bounding circles. Allow icons to be cropped at screen edges.
+- Fade the icons toward the center with an elliptical radial mask: about 6%
+  opacity in the center, ramping to full visibility near the edges. Keep the
+  mask on the icons only so the base color remains solid.
+- Keep the palette in the app theme and ensure the background does not intercept
+  input or draw over screen content.
+
 - **Sync with other people in the household**
   - Over local WiFi / LAN, no server, no third parties.
   - Consolidates the lists of everyone in the house.
