@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:ui' show PointMode;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -7,16 +8,13 @@ import 'package:flutter_svg/flutter_svg.dart';
 class KitchenPalette extends ThemeExtension<KitchenPalette> {
   const KitchenPalette({
     this.background = const Color(0xFFF5F0DF),
-    this.icon = const Color(0xFFEEC364),
   });
 
   final Color background;
-  final Color icon;
 
   @override
-  KitchenPalette copyWith({Color? background, Color? icon}) => KitchenPalette(
+  KitchenPalette copyWith({Color? background}) => KitchenPalette(
         background: background ?? this.background,
-        icon: icon ?? this.icon,
       );
 
   @override
@@ -24,7 +22,6 @@ class KitchenPalette extends ThemeExtension<KitchenPalette> {
     if (other is! KitchenPalette) return this;
     return KitchenPalette(
       background: Color.lerp(background, other.background, t)!,
-      icon: Color.lerp(icon, other.icon, t)!,
     );
   }
 }
@@ -35,6 +32,8 @@ const double kitchenBackgroundBaseSize = 88;
 const double kitchenBackgroundCenterOpacity = 0.06;
 const double kitchenBackgroundCenterStop = 0.22;
 const double kitchenBackgroundEdgeStop = 0.85;
+const double kitchenBackgroundPaperGrainDensity = 0.025;
+const double kitchenBackgroundPaperFiberDensity = 0.0006;
 const int kitchenBackgroundSeed = 7;
 const int _maxPlacementAttemptsPerIcon = 80;
 
@@ -221,13 +220,13 @@ class _KitchenBackgroundState extends State<KitchenBackground> {
                           kitchenBackgroundEdgeStop,
                         ],
                         colors: [
-                          palette.icon.withValues(
+                          Colors.white.withValues(
                             alpha: kitchenBackgroundCenterOpacity,
                           ),
-                          palette.icon.withValues(
+                          Colors.white.withValues(
                             alpha: kitchenBackgroundCenterOpacity,
                           ),
-                          palette.icon,
+                          Colors.white,
                         ],
                         transform: const _EllipticalGradientTransform(),
                       ).createShader(bounds);
@@ -247,13 +246,21 @@ class _KitchenBackgroundState extends State<KitchenBackground> {
                                 placement.asset,
                                 width: placement.size,
                                 height: placement.size,
-                                colorFilter: _preservingHighlightColorFilter(
-                                    palette.icon),
                               ),
                             ),
                           ),
                       ],
                     ),
+                  ),
+                ),
+              ),
+            ),
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    key: ValueKey('kitchen-paper-texture'),
+                    painter: _PaperTexturePainter(),
                   ),
                 ),
               ),
@@ -280,33 +287,65 @@ class _EllipticalGradientTransform extends GradientTransform {
   }
 }
 
-ColorFilter _preservingHighlightColorFilter(Color iconColor) {
-  // Re-map baked gold fills while preserving the SVGs' white highlights.
-  const originalIconColor = Color(0xFFEEC364);
-  final redScale = (1 - iconColor.r) / (1 - originalIconColor.r);
-  final greenScale = (1 - iconColor.g) / (1 - originalIconColor.g);
-  final blueScale = (1 - iconColor.b) / (1 - originalIconColor.b);
+class _PaperTexturePainter extends CustomPainter {
+  const _PaperTexturePainter();
 
-  return ColorFilter.matrix([
-    redScale,
-    0,
-    0,
-    0,
-    1 - redScale,
-    0,
-    greenScale,
-    0,
-    0,
-    1 - greenScale,
-    0,
-    0,
-    blueScale,
-    0,
-    1 - blueScale,
-    0,
-    0,
-    0,
-    1,
-    0,
-  ]);
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+
+    final random = Random(7919);
+    final grainCount =
+        (size.width * size.height * kitchenBackgroundPaperGrainDensity).ceil();
+    final lightGrain = <Offset>[];
+    final darkGrain = <Offset>[];
+    for (var i = 0; i < grainCount; i++) {
+      final point = Offset(
+        random.nextDouble() * size.width,
+        random.nextDouble() * size.height,
+      );
+      (random.nextBool() ? lightGrain : darkGrain).add(point);
+    }
+
+    canvas
+      ..drawPoints(
+        PointMode.points,
+        lightGrain,
+        Paint()
+          ..color = const Color(0x24FFFFFF)
+          ..strokeWidth = 0.8
+          ..strokeCap = StrokeCap.square,
+      )
+      ..drawPoints(
+        PointMode.points,
+        darkGrain,
+        Paint()
+          ..color = const Color(0x127B6845)
+          ..strokeWidth = 0.8
+          ..strokeCap = StrokeCap.square,
+      );
+
+    final fiberCount =
+        (size.width * size.height * kitchenBackgroundPaperFiberDensity).ceil();
+    final fiberPaint = Paint()
+      ..color = const Color(0x167B6845)
+      ..strokeWidth = 0.35
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < fiberCount; i++) {
+      final start = Offset(
+        random.nextDouble() * size.width,
+        random.nextDouble() * size.height,
+      );
+      final length = 3 + random.nextDouble() * 8;
+      final angle = (random.nextDouble() - 0.5) * 0.8;
+      canvas.drawLine(
+        start,
+        start + Offset(cos(angle) * length, sin(angle) * length),
+        fiberPaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PaperTexturePainter oldDelegate) => false;
 }
