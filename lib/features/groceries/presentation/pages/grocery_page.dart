@@ -108,10 +108,15 @@ class _GroceryPageState extends ConsumerState<GroceryPage> {
                 if (visible.isEmpty) {
                   return _EmptyState(shoppingOnly: _shoppingOnly);
                 }
-                return ListView.separated(
+                return GridView.builder(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: 1,
+                  ),
                   itemCount: visible.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemBuilder: (context, index) =>
                       ProductTile(product: visible[index]),
                 );

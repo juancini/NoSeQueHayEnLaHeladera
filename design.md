@@ -16,6 +16,23 @@ An app that remembers for you what needs to be bought for the house!
   - View the shopping list (what is missing).
   - Show empty products first
 
+### Home screen
+
+- Show products in a scrollable grid with four columns and square cells.
+- Each cell shows the product image when one is available, with the product
+  name below it. Do not draw a card or square background around the image;
+  leave the image and name visually unboxed. Use a placeholder icon when there
+  is no saved image.
+- Show available/bought product images in full color. Show products that need
+  buying in grayscale.
+- A short tap toggles status: a product that needs buying is marked bought;
+  an available product is marked empty. Use the existing repository operations
+  so changes persist and sync as before.
+- A long press opens the product actions: **Cambiar nombre**,
+  **Cambiar duración**, and **Eliminar**.
+- Keep the **Todo / Para comprar** filter, **Agregar** flow, and household and
+  people management button available on the home screen.
+
 - **Sync with other people in the household**
   - Over local WiFi / LAN, no server, no third parties.
   - Consolidates the lists of everyone in the house.

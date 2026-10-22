@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/drawing_image_storage.dart';
 import '../../domain/entities/product.dart';
+import '../../domain/repositories/grocery_repository.dart';
 import '../providers/grocery_providers.dart';
 
 class ProductTile extends ConsumerWidget {
@@ -17,152 +18,168 @@ class ProductTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final repository = ref.read(groceryRepositoryProvider);
     final theme = Theme.of(context);
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          children: [
-            CircleAvatar(
-              backgroundColor: product.needsBuying
-                  ? theme.colorScheme.tertiaryContainer
-                  : theme.colorScheme.primaryContainer,
-              child: FutureBuilder<File?>(
-                future: _imageStorage.resolve(product.imageSrc),
-                builder: (context, snapshot) {
-                  final file = snapshot.data;
-                  if (file != null) {
-                    return ClipOval(
-                      child: Image.file(
-                        file,
-                        width: 40,
-                        height: 40,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => _placeholder(theme),
-                      ),
-                    );
-                  }
-                  return _placeholder(theme);
-                },
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(product.name, style: theme.textTheme.titleMedium),
-                  const SizedBox(height: 2),
-                  Text(
-                    product.needsBuying
-                        ? 'Falta · dura ${product.lastsDays} días'
-                        : 'Hay · dura ${product.lastsDays} días',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              tooltip: product.needsBuying
-                  ? 'Marcar como comprado'
-                  : 'Marcar como terminado',
-              onPressed: () async {
-                try {
-                  if (product.needsBuying) {
-                    await repository.markBought(product.id);
-                  } else {
-                    await repository.markEmpty(product.id);
-                  }
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('No se pudo actualizar: $error')),
-                    );
-                  }
-
-                }
-              },
-              icon: Icon(
-                product.needsBuying
-                    ? Icons.check_circle_outline
-                    : Icons.remove_shopping_cart_outlined,
-              ),
-            ),
-            PopupMenuButton<String>(
-              tooltip: 'Acciones',
-              onSelected: (action) async {
-                try {
-                  switch (action) {
-                    case 'rename':
-                      await showDialog<void>(
-                        context: context,
-                        builder: (_) => _RenameProductDialog(
-                          product: product,
-                          onSave: (name) =>
-                              repository.updateProduct(product.id, name: name),
-                        ),
-                      );
-                      break;
-                    case 'editDays':
-                      await showDialog<void>(
-                        context: context,
-                        builder: (_) => _EditDaysDialog(
-                          product: product,
-                          onSave: (days) => repository.updateProduct(product.id,
-                              lastsDays: days),
-                        ),
-                      );
-                      break;
-                    case 'delete':
-                      await repository.deleteProduct(product.id);
-                      break;
-                  }
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('No se pudo actualizar: $error')),
-                    );
-                  }
-                }
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(
-                  value: 'rename',
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.edit_outlined),
-                    title: Text('Cambiar nombre'),
+    return Material(
+      color: Colors.transparent,
+      child: GestureDetector(
+        onLongPressStart: (details) =>
+            _showActions(context, repository, details.globalPosition),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _toggleStatus(context, repository),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: Center(
+                    child: FutureBuilder<File?>(
+                      future: _imageStorage.resolve(product.imageSrc),
+                      builder: (context, snapshot) {
+                        final file = snapshot.data;
+                        if (file != null) {
+                          final image = Image.file(
+                            file,
+                            fit: BoxFit.contain,
+                            errorBuilder: (_, __, ___) => _placeholder(theme),
+                          );
+                          return product.needsBuying
+                              ? ColorFiltered(
+                                  colorFilter: const ColorFilter.matrix([
+                                    0.2126, 0.7152, 0.0722, 0, 0,
+                                    0.2126, 0.7152, 0.0722, 0, 0,
+                                    0.2126, 0.7152, 0.0722, 0, 0,
+                                    0, 0, 0, 1, 0,
+                                  ]),
+                                  child: image,
+                                )
+                              : image;
+                        }
+                        return _placeholder(theme);
+                      },
+                    ),
                   ),
                 ),
-                const PopupMenuItem(
-                  value: 'editDays',
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.edit_calendar_outlined),
-                    title: Text('Cambiar duración'),
-                  ),
-                ),
-                const PopupMenuItem(
-                  value: 'delete',
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.delete_outline),
-                    title: Text('Eliminar'),
-                  ),
+                const SizedBox(height: 4),
+                Text(
+                  product.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.labelMedium,
                 ),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
   }
 
+  Future<void> _toggleStatus(
+    BuildContext context,
+    GroceryRepository repository,
+  ) async {
+    try {
+      if (product.needsBuying) {
+        await repository.markBought(product.id);
+      } else {
+        await repository.markEmpty(product.id);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo actualizar: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showActions(
+    BuildContext context,
+    GroceryRepository repository,
+    Offset position,
+  ) async {
+    final screenSize = MediaQuery.sizeOf(context);
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        screenSize.width - position.dx,
+        screenSize.height - position.dy,
+      ),
+      items: const [
+        PopupMenuItem(
+          value: 'rename',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.edit_outlined),
+            title: Text('Cambiar nombre'),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'editDays',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.edit_calendar_outlined),
+            title: Text('Cambiar duración'),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'delete',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_outline),
+            title: Text('Eliminar'),
+          ),
+        ),
+      ],
+    );
+
+    if (action == null || !context.mounted) return;
+
+    try {
+      switch (action) {
+        case 'rename':
+          await showDialog<void>(
+            context: context,
+            builder: (_) => _RenameProductDialog(
+              product: product,
+              onSave: (name) =>
+                  repository.updateProduct(product.id, name: name),
+            ),
+          );
+          break;
+        case 'editDays':
+          await showDialog<void>(
+            context: context,
+            builder: (_) => _EditDaysDialog(
+              product: product,
+              onSave: (days) =>
+                  repository.updateProduct(product.id, lastsDays: days),
+            ),
+          );
+          break;
+        case 'delete':
+          await repository.deleteProduct(product.id);
+          break;
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo actualizar: $error')),
+        );
+      }
+    }
+  }
+
   Widget _placeholder(ThemeData theme) => Icon(
         product.needsBuying ? Icons.shopping_basket_outlined : Icons.kitchen,
         color: product.needsBuying
-            ? theme.colorScheme.onTertiaryContainer
-            : theme.colorScheme.onPrimaryContainer,
+            ? theme.colorScheme.onSurfaceVariant
+            : theme.colorScheme.primary,
+        size: 40,
       );
 }
 
