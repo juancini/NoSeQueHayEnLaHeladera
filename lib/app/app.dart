@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../features/household/domain/entities/household_invite.dart';
 import '../features/household/presentation/pages/household_page.dart';
 import '../features/groceries/presentation/pages/grocery_page.dart';
+import '../features/groceries/presentation/widgets/kitchen_background.dart';
 
 class HeladeraApp extends StatefulWidget {
   const HeladeraApp({super.key});
@@ -97,10 +98,14 @@ class _HeladeraAppState extends State<HeladeraApp> {
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: seedColor),
-        scaffoldBackgroundColor: const Color(0xFFF7F8F4),
+        scaffoldBackgroundColor: Colors.transparent,
+        extensions: const [KitchenPalette()],
         inputDecorationTheme: const InputDecorationTheme(
           border: OutlineInputBorder(),
         ),
+      ),
+      builder: (context, child) => KitchenBackground(
+        child: child ?? const SizedBox.shrink(),
       ),
       home: const GroceryPage(),
     );

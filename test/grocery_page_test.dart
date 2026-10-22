@@ -1,7 +1,8 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'dart:typed_data';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/domain/entities/product.dart';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/domain/repositories/grocery_repository.dart';
 import 'package:no_se_que_hay_en_la_heladera/features/groceries/presentation/pages/grocery_page.dart';
@@ -15,6 +16,8 @@ import 'package:no_se_que_hay_en_la_heladera/features/household/presentation/pro
 class _GroceryRepository implements GroceryRepository {
   String? updatedProductId;
   String? updatedName;
+  String? boughtProductId;
+  String? emptiedProductId;
 
   @override
   Stream<List<Product>> watchProducts() => Stream.value(const []);
@@ -23,7 +26,8 @@ class _GroceryRepository implements GroceryRepository {
   Stream<List<Product>> watchShoppingList() => Stream.value(const []);
 
   @override
-  Future<Product> addProduct(String name, int lastsDays, {Uint8List? imagePng}) =>
+  Future<Product> addProduct(String name, int lastsDays,
+          {Uint8List? imagePng}) =>
       throw UnimplementedError();
 
   @override
@@ -33,10 +37,14 @@ class _GroceryRepository implements GroceryRepository {
   }
 
   @override
-  Future<void> markBought(String id) => throw UnimplementedError();
+  Future<void> markBought(String id) async {
+    boughtProductId = id;
+  }
 
   @override
-  Future<void> markEmpty(String id) => throw UnimplementedError();
+  Future<void> markEmpty(String id) async {
+    emptiedProductId = id;
+  }
 
   @override
   Future<void> deleteProduct(String id) => throw UnimplementedError();
@@ -100,13 +108,23 @@ void main() {
           groceryRepositoryProvider.overrideWithValue(repository),
         ],
         child: const MaterialApp(
-          home: Scaffold(body: ProductTile(product: product)),
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 90,
+                height: 90,
+                child: ProductTile(product: product),
+              ),
+            ),
+          ),
         ),
       ),
     );
 
-    await tester.tap(find.byTooltip('Acciones'));
+    await tester.longPress(find.byType(ProductTile));
     await tester.pumpAndSettle();
+    expect(find.text('Cambiar duración'), findsOneWidget);
+    expect(find.text('Eliminar'), findsOneWidget);
     await tester.tap(find.text('Cambiar nombre'));
     await tester.pumpAndSettle();
 
@@ -125,5 +143,92 @@ void main() {
     expect(repository.updatedProductId, 'milk-id');
     expect(repository.updatedName, 'Leche entera');
     expect(find.text('Cambiar nombre'), findsNothing);
+  });
+
+  testWidgets('a short tap marks a product as bought', (tester) async {
+    final repository = _GroceryRepository();
+    const product = Product(
+      id: 'milk-id',
+      name: 'Leche',
+      lastsDays: 5,
+      updatedAt: 0,
+      sequence: 0,
+      lastWriterMemberId: '',
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          groceryRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 90,
+                height: 90,
+                child: ProductTile(product: product),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(ProductTile));
+    await tester.pump();
+
+    expect(
+        find.descendant(
+          of: find.byType(ProductTile),
+          matching: find.byType(Card),
+        ),
+        findsNothing);
+    expect(repository.boughtProductId, 'milk-id');
+    expect(repository.emptiedProductId, isNull);
+  });
+
+  testWidgets('products are shown in a scrollable four-column grid',
+      (tester) async {
+    final products = List.generate(
+      32,
+      (index) => Product(
+        id: 'product-$index',
+        name: 'Producto $index',
+        lastsDays: 5,
+        updatedAt: 0,
+        sequence: index,
+        lastWriterMemberId: '',
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          groceryRepositoryProvider.overrideWithValue(_GroceryRepository()),
+          householdRepositoryProvider.overrideWithValue(_HouseholdRepository()),
+          productsProvider.overrideWith((ref) => Stream.value(products)),
+        ],
+        child: const MaterialApp(home: GroceryPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final grid = tester.widget<GridView>(find.byType(GridView));
+    expect(
+      (grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount)
+          .crossAxisCount,
+      4,
+    );
+    expect(find.text('Producto 31'), findsNothing);
+
+    await tester.scrollUntilVisible(
+      find.text('Producto 31'),
+      300,
+      scrollable: find.byType(Scrollable),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Producto 31'), findsOneWidget);
   });
 }
