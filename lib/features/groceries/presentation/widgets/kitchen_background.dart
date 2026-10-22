@@ -29,7 +29,7 @@ class KitchenPalette extends ThemeExtension<KitchenPalette> {
   }
 }
 
-const double kitchenBackgroundCell = 150;
+const double kitchenBackgroundCell = 90;
 const double kitchenBackgroundGapFactor = 0.10;
 const double kitchenBackgroundBaseSize = 88;
 const double kitchenBackgroundCenterOpacity = 0.06;
@@ -247,8 +247,8 @@ class _KitchenBackgroundState extends State<KitchenBackground> {
                                 placement.asset,
                                 width: placement.size,
                                 height: placement.size,
-                                colorFilter:
-                                    _preservingHighlightColorFilter(palette.icon),
+                                colorFilter: _preservingHighlightColorFilter(
+                                    palette.icon),
                               ),
                             ),
                           ),
